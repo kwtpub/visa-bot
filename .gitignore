@@ -1,0 +1,23 @@
+# Secrets / local config
+config.yaml
+*.local.yaml
+.env
+
+# SeleniumBase / browser artifacts
+downloaded_files/
+latest_logs/
+assets/
+*.png
+screenshots/
+saved_cookies/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Logs
+*.log
+logs/

@@ -1,0 +1,115 @@
+# =============================================================================
+#  VFS Global appointment bot — configuration
+#  Copy this file to  config.yaml  and fill in your values.
+#  config.yaml is git-ignored (it has secrets).
+# =============================================================================
+
+# --- Which VFS portal -------------------------------------------------------
+# This is the path segment of the login URL:
+#   https://visa.vfsglobal.com/<this>/login
+# For "Russia -> France" it is "rus/en/fra".
+# Change it if you apply from another country.
+portal:
+  url_segment: "rus/en/fra"
+  # Full login URL is derived as https://visa.vfsglobal.com/<url_segment>/login
+  # Override here only if VFS changes the scheme:
+  login_url: ""          # leave empty to auto-build
+
+# --- VFS account credentials ------------------------------------------------
+account:
+  email: "you@example.com"
+  password: "your-vfs-password"
+
+# --- OTP handling -----------------------------------------------------------
+# VFS sends a one-time code by email at login and (sometimes) before
+# confirming the booking.
+#   mode: "manual" -> the bot prints ">>> ENTER OTP:" and waits for you to
+#                     type it in the terminal.
+#   mode: "imap"   -> the bot reads the code automatically from a mailbox.
+otp:
+  mode: "manual"          # "manual" or "imap"
+  imap:
+    host: "imap.gmail.com"
+    port: 993
+    user: "you@gmail.com"
+    # For Gmail use an App Password, not your main password.
+    password: "app-password-here"
+    # Folder to search and the sender / subject to match.
+    folder: "INBOX"
+    from_contains: "vfsglobal"
+    # How long to keep polling the mailbox for a fresh code (seconds).
+    wait_seconds: 120
+
+# --- What appointment you want ---------------------------------------------
+# These strings must match EXACTLY what appears in the dropdowns on the site
+# (visa application centre, category, sub-category). Run with --inspect first
+# to have the bot print the available options, then paste them here.
+appointment:
+  visa_centre: "France Visa Application Centre - Moscow"
+  visa_category: "Short term visa (up to 90 days)"
+  visa_sub_category: "Tourism"
+  # Optional: only accept slots inside this date window (YYYY-MM-DD).
+  # Leave empty to accept any available date.
+  earliest_date: ""
+  latest_date: ""
+  # Number of applicants in this booking (usually 1).
+  applicants_count: 1
+
+# --- Applicant personal data (used only for auto-booking) -------------------
+# Needed only if auto_book is true. Some portals pre-fill these from the
+# account; in that case the bot just clicks through.
+applicants:
+  - first_name: "IVAN"
+    last_name: "IVANOV"
+    passport_number: "00AB123456"
+    passport_expiry: "2030-01-01"      # YYYY-MM-DD
+    date_of_birth: "1990-01-01"        # YYYY-MM-DD
+    nationality: "Russian"
+    gender: "Male"                     # Male / Female
+    phone_country_code: "+7"
+    phone_number: "9990000000"
+    email: "you@example.com"
+
+# --- Behaviour --------------------------------------------------------------
+behaviour:
+  # false = only monitor + notify; true = also try to book the slot.
+  auto_book: true
+  # Seconds to wait between availability checks. DO NOT make this tiny —
+  # VFS bans accounts for hammering. 600-1200s (10-20 min) is sane; with a
+  # bit of jitter applied automatically.
+  check_interval_seconds: 900
+  # Random extra delay added to every wait, in seconds [min, max].
+  jitter_seconds: [30, 180]
+  # Stop after this many successful bookings (then exit). 0 = never stop.
+  stop_after_bookings: 1
+  # Re-login if the session looks dead this many checks in a row failed.
+  relogin_after_failures: 3
+
+# --- Network ----------------------------------------------------------------
+network:
+  # STRONGLY RECOMMENDED. VFS/Cloudflare blocks datacenter/hosting IPs at the
+  # edge (HTTP 403 with code 403201). Use a RESIDENTIAL or MOBILE proxy whose
+  # exit IP is in the country you apply from.
+  # Format: "user:pass@host:port"  or  "host:port"  (leave empty for none).
+  proxy: ""
+  # Run the browser without a visible window. Set false the first few runs so
+  # you can watch what happens and solve a captcha by hand if needed.
+  headless: false
+  # Pin a specific Chrome major version if SeleniumBase picks a wrong one.
+  chrome_version: ""        # e.g. "126" — leave empty for auto
+
+# --- Telegram notifications (optional) --------------------------------------
+# Create a bot via @BotFather, get its token; get your chat id from @userinfobot.
+# Leave bot_token empty to disable Telegram and just log to console.
+telegram:
+  bot_token: ""
+  chat_id: ""
+  # Also send a heartbeat every N checks so you know it's alive (0 = off).
+  heartbeat_every: 12
+
+# --- Logging ----------------------------------------------------------------
+logging:
+  level: "INFO"             # DEBUG / INFO / WARNING / ERROR
+  # Save a screenshot on every error / important step.
+  screenshots: true
+  screenshot_dir: "screenshots"
