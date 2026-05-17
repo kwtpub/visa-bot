@@ -21,3 +21,5 @@ venv/
 # Logs
 *.log
 logs/
+needed/
+.playwright-mcp/

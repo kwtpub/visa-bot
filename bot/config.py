@@ -67,6 +67,23 @@ class Config:
     def chrome_version(self) -> str:
         return str(self.raw.get("network", {}).get("chrome_version") or "").strip()
 
+    # --- captcha ----------------------------------------------------------
+    @property
+    def captcha_provider(self) -> str:
+        return str(self.raw.get("captcha", {}).get("provider") or "none").strip().lower()
+
+    @property
+    def captcha_api_key(self) -> str:
+        return str(self.raw.get("captcha", {}).get("api_key") or "").strip()
+
+    @property
+    def captcha_timeout(self) -> int:
+        return int(self.raw.get("captcha", {}).get("timeout_seconds", 120))
+
+    @property
+    def captcha_enabled(self) -> bool:
+        return self.captcha_provider not in ("none", "off", "") and bool(self.captcha_api_key)
+
     @property
     def appointment(self) -> dict[str, Any]:
         return self.raw["appointment"]
@@ -128,7 +145,7 @@ def load_config(path: Path | None = None) -> Config:
             f"{path} not found. Copy config.yaml.example to config.yaml and edit it."
         )
     try:
-        raw = yaml.safe_load(path.read_text()) or {}
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as e:  # pragma: no cover - user error path
         _fail(f"could not parse {path}: {e}")
         return Config()  # unreachable, keeps type-checkers happy

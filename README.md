@@ -78,6 +78,33 @@ python -m bot.main --once
 python -m bot.main --show
 ```
 
+## Cloudflare Turnstile (paid solver)
+
+The free `sb.uc_gui_click_captcha()` helper sometimes can't get past Turnstile
+on VFS — especially in headless mode or after a few retries. Configure a paid
+solver as a fallback:
+
+1. Sign up at https://capsolver.com and top up a few dollars (~$0.8 / 1000
+   solves on Turnstile).
+2. Copy the API key from the dashboard.
+3. Edit `config.yaml`:
+   ```yaml
+   captcha:
+     provider: "capsolver"
+     api_key: "CAP-XXXXXXXX..."
+     timeout_seconds: 120
+   ```
+
+The bot will:
+1. First try the built-in UC click (free).
+2. If that doesn't clear the widget after 2 attempts, extract the Turnstile
+   `sitekey` from the page, send it to CapSolver, and inject the returned
+   token into the form.
+3. If everything fails and you're running with `--show`, fall back to
+   manual click.
+
+Set `provider: "none"` to disable the paid path entirely.
+
 ## How it works
 
 ```

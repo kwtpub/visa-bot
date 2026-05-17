@@ -98,6 +98,20 @@ network:
   # Pin a specific Chrome major version if SeleniumBase picks a wrong one.
   chrome_version: ""        # e.g. "126" — leave empty for auto
 
+# --- Captcha solver (Cloudflare Turnstile) ----------------------------------
+# SeleniumBase UC mode tries to click the Turnstile checkbox automatically,
+# but it doesn't always work — especially in headless mode or after a few
+# rate-limited tries. Configure a paid solver here as a fallback.
+#
+# Supported providers:
+#   "none"      — disabled (only the built-in UC click is used).
+#   "capsolver" — https://capsolver.com (recommended; ~$0.8 / 1000 Turnstile).
+#   "twocaptcha"— https://2captcha.com  (TODO: not implemented yet).
+captcha:
+  provider: "none"          # "none" | "capsolver"
+  api_key: ""               # CapSolver key, looks like "CAP-XXXXXXXX..."
+  timeout_seconds: 120      # max time to wait for a token
+
 # --- Telegram notifications (optional) --------------------------------------
 # Create a bot via @BotFather, get its token; get your chat id from @userinfobot.
 # Leave bot_token empty to disable Telegram and just log to console.

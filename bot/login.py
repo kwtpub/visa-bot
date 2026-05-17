@@ -9,6 +9,13 @@ from __future__ import annotations
 import time
 
 from . import selectors as S
+from .captcha import (
+    CaptchaError,
+    extract_turnstile_sitekey,
+    get_solver,
+    inject_turnstile_token,
+    page_url as _page_url,
+)
 from .otp import fill_otp_into_page, get_otp
 from .util import (
     by_of,
@@ -100,29 +107,68 @@ def looks_logged_in(sb) -> bool:
 
 
 # --- the flow --------------------------------------------------------------
+def _try_uc_click(sb) -> None:
+    """Try every UC-mode captcha helper SeleniumBase exposes, swallowing errors."""
+    for fn_name in ("uc_gui_click_captcha", "uc_gui_handle_captcha", "uc_gui_click_cf"):
+        fn = getattr(sb, fn_name, None)
+        if fn is None:
+            continue
+        try:
+            fn()
+            return
+        except Exception as e:
+            log.debug("%s failed: %s", fn_name, e)
+
+
+def _solve_with_paid_service(sb, cfg) -> bool:
+    """If a paid solver is configured, fetch a token and inject it. Returns True on success."""
+    try:
+        solver = get_solver(cfg)
+    except CaptchaError as e:
+        log.warning("Captcha solver disabled: %s", e)
+        return False
+    if solver is None:
+        return False
+
+    sitekey = extract_turnstile_sitekey(sb)
+    if not sitekey:
+        log.warning("Paid solver configured but couldn't find the Turnstile sitekey on the page.")
+        return False
+    url = _page_url(sb) or cfg.login_url
+    log.info("Asking %s to solve Turnstile (sitekey=%s…, url=%s)",
+             cfg.captcha_provider, sitekey[:12], url)
+    try:
+        token = solver.solve_turnstile(sitekey, url)
+    except CaptchaError as e:
+        log.error("Captcha solver failed: %s", e)
+        return False
+
+    if not inject_turnstile_token(sb, token):
+        log.warning("Got a token but couldn't inject it into the page.")
+        return False
+    human_pause(1.0, 2.0)
+    return True
+
+
 def _pass_turnstile(sb, cfg) -> None:
-    """Best-effort Cloudflare Turnstile solve via SeleniumBase UC helpers."""
-    # If there's no challenge iframe at all, nothing to do.
+    """Best-effort Cloudflare Turnstile solve.
+
+    Order of attempts:
+      1) SeleniumBase UC-mode auto-click (free, sometimes flaky).
+      2) Paid solver (CapSolver) if configured — extract sitekey, get token,
+         inject into the page.
+      3) Manual fallback when running with --show: give the human ~90s to click.
+    """
+    # Nothing on page at all -> done.
     if not first_present(sb, S.TURNSTILE_IFRAME, timeout=3):
         return
+
     log.info("Cloudflare Turnstile present — attempting UC click…")
-    # SeleniumBase exposes a few helpers across versions; try them in order.
-    for attempt in range(3):
-        try:
-            # newer name
-            sb.uc_gui_click_captcha()
-        except Exception:
-            try:
-                # older / alternative
-                sb.uc_gui_handle_captcha()
-            except Exception:
-                try:
-                    sb.uc_gui_click_cf()
-                except Exception as e:
-                    log.debug("UC captcha helper not available/failed: %s", e)
+    for attempt in range(2):
+        _try_uc_click(sb)
         human_pause(1.5, 3.0)
         if not first_present(sb, S.TURNSTILE_IFRAME, timeout=2):
-            log.info("Turnstile cleared.")
+            log.info("Turnstile cleared by UC-mode.")
             return
         # try a reconnect-open which often clears CF state
         try:
@@ -130,11 +176,28 @@ def _pass_turnstile(sb, cfg) -> None:
         except Exception:
             pass
         human_pause(2, 4)
-    # If still here, it's not necessarily fatal — the form may still be usable,
-    # or the operator can solve it when running with --show.
+        if not first_present(sb, S.TURNSTILE_IFRAME, timeout=2):
+            log.info("Turnstile cleared after reconnect.")
+            return
+
+    # UC didn't manage it -> try the paid service.
+    if cfg.captcha_enabled:
+        log.info("Falling back to paid captcha service: %s", cfg.captcha_provider)
+        if _solve_with_paid_service(sb, cfg):
+            # Give the page a moment to validate the token
+            for _ in range(6):
+                if not first_present(sb, S.TURNSTILE_IFRAME, timeout=1):
+                    log.info("Turnstile cleared by paid solver.")
+                    return
+                time.sleep(1)
+            log.warning("Paid solver returned a token but Turnstile widget is still present. "
+                        "The form may still accept it on submit — continuing.")
+            return
+        # solver returned False -> fall through to manual
+
+    # Last resort: manual.
     if first_present(sb, S.TURNSTILE_IFRAME, timeout=2):
         log.warning("Turnstile still showing. If running with --show, solve it manually now…")
-        # give a human up to 90s to click it when not headless
         if not cfg.headless:
             for _ in range(18):
                 time.sleep(5)
