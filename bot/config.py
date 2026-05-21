@@ -1,6 +1,7 @@
 """Load and validate config.yaml."""
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,7 +58,11 @@ class Config:
 
     @property
     def proxy(self) -> str:
-        return (self.raw.get("network", {}).get("proxy") or "").strip()
+        value = (self.raw.get("network", {}).get("proxy") or "").strip()
+        if value.lower().startswith("env:"):
+            env_name = value.split(":", 1)[1].strip()
+            return os.getenv(env_name, "").strip()
+        return value or os.getenv("VFS_PROXY", "").strip()
 
     @property
     def headless(self) -> bool:
@@ -74,7 +79,11 @@ class Config:
 
     @property
     def captcha_api_key(self) -> str:
-        return str(self.raw.get("captcha", {}).get("api_key") or "").strip()
+        value = str(self.raw.get("captcha", {}).get("api_key") or "").strip()
+        if value.lower().startswith("env:"):
+            env_name = value.split(":", 1)[1].strip()
+            return os.getenv(env_name, "").strip()
+        return value or os.getenv("CAPSOLVER_API_KEY", "").strip()
 
     @property
     def captcha_timeout(self) -> int:

@@ -91,8 +91,12 @@ solver as a fallback:
    ```yaml
    captcha:
      provider: "capsolver"
-     api_key: "CAP-XXXXXXXX..."
+     api_key: "env:CAPSOLVER_API_KEY"
      timeout_seconds: 120
+   ```
+   Then set the token before running the bot, for example in PowerShell:
+   ```powershell
+   $env:CAPSOLVER_API_KEY="CAP-XXXXXXXX..."
    ```
 
 The bot will:

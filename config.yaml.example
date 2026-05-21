@@ -91,7 +91,7 @@ network:
   # edge (HTTP 403 with code 403201). Use a RESIDENTIAL or MOBILE proxy whose
   # exit IP is in the country you apply from.
   # Format: "user:pass@host:port"  or  "host:port"  (leave empty for none).
-  proxy: ""
+  proxy: ""                 # or "env:VFS_PROXY"; default env fallback is VFS_PROXY
   # Run the browser without a visible window. Set false the first few runs so
   # you can watch what happens and solve a captcha by hand if needed.
   headless: false
@@ -109,7 +109,7 @@ network:
 #   "twocaptcha"— https://2captcha.com  (TODO: not implemented yet).
 captcha:
   provider: "none"          # "none" | "capsolver"
-  api_key: ""               # CapSolver key, looks like "CAP-XXXXXXXX..."
+  api_key: ""               # CapSolver key, "env:CAPSOLVER_API_KEY", or leave empty to read CAPSOLVER_API_KEY
   timeout_seconds: 120      # max time to wait for a token
 
 # --- Telegram notifications (optional) --------------------------------------

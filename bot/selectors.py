@@ -50,8 +50,12 @@ LOGIN_PASSWORD = [
 ]
 LOGIN_SUBMIT = [
     'button[type="submit"]',
+    'button.btn-block.btn-brand-orange',
     'button.mat-focus-indicator.btn-block',
+    'button.btn-block.mdc-button',
     '//button[contains(., "Sign In") or contains(., "Sign in") or contains(., "Login")]',
+    # Russian portals (rus/ru/*) display text in Russian:
+    '//button[contains(., "Войти") or contains(., "Вход")]',
 ]
 # Shown after a wrong password / rate limit.
 LOGIN_ERROR = [
@@ -59,6 +63,21 @@ LOGIN_ERROR = [
     'mat-error',
     '.error-message',
     '//*[contains(text(), "incorrect") or contains(text(), "Invalid") or contains(text(), "try again later")]',
+    # Russian error messages:
+    '//*[contains(text(), "неверн") or contains(text(), "Ошибка") or contains(text(), "попробуйте позже")]',
+]
+
+# ---------------------------------------------------------------------------
+# Cookie consent overlay (OneTrust) — blocks form interaction if not dismissed
+# ---------------------------------------------------------------------------
+COOKIE_ACCEPT_BTN = [
+    '#onetrust-accept-btn-handler',           # "Accept All Cookies"
+    '#onetrust-reject-all-handler',           # "Accept Only Necessary" (also works)
+    '//button[contains(., "Accept All")]',
+    '//button[contains(., "Accept Only Necessary")]',
+]
+COOKIE_BANNER = [
+    '#onetrust-banner-sdk',
 ]
 
 # ---------------------------------------------------------------------------

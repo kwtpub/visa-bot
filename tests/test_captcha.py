@@ -10,9 +10,17 @@ from __future__ import annotations
 
 import sys
 import types
+import importlib.util
 from unittest import mock
 
+if importlib.util.find_spec("requests") is None:
+    sys.modules["requests"] = types.SimpleNamespace(post=None)
+
+if importlib.util.find_spec("yaml") is None:
+    sys.modules["yaml"] = types.SimpleNamespace(YAMLError=Exception, safe_load=lambda _: {})
+
 from bot.captcha import CapSolver, CaptchaError, get_solver
+from bot.config import Config
 
 
 # --- fake config object ----------------------------------------------------
@@ -52,7 +60,8 @@ def test_solve_turnstile_happy_path():
     poll2 = _resp({"errorId": 0, "status": "ready",
                    "solution": {"token": "0.AAAA-fake-token"}})
     with mock.patch("bot.captcha.requests.post",
-                    side_effect=[create, poll1, poll2]) as m:
+                    side_effect=[create, poll1, poll2]) as m, \
+         mock.patch("bot.captcha.time.sleep", return_value=None):
         token = cs.solve_turnstile("0xSITEKEY", "https://example.com/login")
     assert token == "0.AAAA-fake-token", token
     # verify endpoints
@@ -80,7 +89,9 @@ def test_solve_turnstile_timeout():
     create = _resp({"errorId": 0, "taskId": "t-1"})
     proc = _resp({"errorId": 0, "status": "processing"})
     with mock.patch("bot.captcha.requests.post",
-                    side_effect=[create] + [proc] * 50):
+                    side_effect=[create] + [proc] * 50), \
+         mock.patch("bot.captcha.time.sleep", return_value=None), \
+         mock.patch("bot.captcha.time.time", side_effect=[100.0, 100.0, 121.0]):
         try:
             cs.solve_turnstile("0xSITEKEY", "https://example.com/login")
         except CaptchaError as e:
@@ -96,6 +107,24 @@ def test_solver_factory_unknown_provider():
         assert "Unknown" in str(e), str(e)
         return
     raise AssertionError("expected CaptchaError on unknown provider")
+
+
+def test_config_captcha_key_can_come_from_default_env():
+    cfg = Config(raw={"captcha": {"api_key": ""}})
+    with mock.patch.dict("os.environ", {"CAPSOLVER_API_KEY": "CAP-ENV"}):
+        assert cfg.captcha_api_key == "CAP-ENV"
+
+
+def test_config_captcha_key_can_reference_named_env():
+    cfg = Config(raw={"captcha": {"api_key": "env:MY_CAPSOLVER_TOKEN"}})
+    with mock.patch.dict("os.environ", {"MY_CAPSOLVER_TOKEN": "CAP-NAMED"}):
+        assert cfg.captcha_api_key == "CAP-NAMED"
+
+
+def test_config_proxy_can_reference_named_env():
+    cfg = Config(raw={"network": {"proxy": "env:VFS_PROXY_TEST"}})
+    with mock.patch.dict("os.environ", {"VFS_PROXY_TEST": "user:pass@host:9000"}):
+        assert cfg.proxy == "user:pass@host:9000"
 
 
 # --- runner ----------------------------------------------------------------

@@ -120,6 +120,91 @@ def _try_uc_click(sb) -> None:
             log.debug("%s failed: %s", fn_name, e)
 
 
+def _page_looks_blank_or_error(sb) -> bool:
+    """Detect blank pages, Chrome error pages, or proxy connection errors."""
+    try:
+        url = (sb.get_current_url() or "").lower()
+    except Exception:
+        url = ""
+    if url.startswith("chrome-error://"):
+        return True
+
+    try:
+        src = (sb.get_page_source() or "").strip().lower()
+    except Exception:
+        return False
+
+    # Check for Chrome error indicators in the page source
+    error_indicators = [
+        "err_connection_reset",
+        "err_connection_refused",
+        "err_connection_timed_out",
+        "err_proxy_connection_failed",
+        "err_tunnel_connection_failed",
+        "err_name_not_resolved",
+        "net::err_",
+        "dns_probe_finished",
+    ]
+    for indicator in error_indicators:
+        if indicator in src:
+            return True
+
+    compact = "".join(src.split())
+    return len(src) < 200 and compact in {
+        "<html><head></head><body></body></html>",
+        "<html><head></head><body></body></html>",
+    }
+
+
+def _open_login_page(sb, cfg, reconnect_seconds: int = 5) -> None:
+    """Open the login page with retry logic for unstable proxies.
+
+    Tries UC reconnect first, then falls back to normal open, with up to
+    3 total attempts to handle proxy connection resets.
+    """
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        # Try UC reconnect first (best for Cloudflare bypass)
+        try:
+            sb.uc_open_with_reconnect(cfg.login_url, reconnect_seconds)
+        except Exception as e:
+            log.debug("uc_open_with_reconnect failed (attempt %d): %s", attempt, e)
+            try:
+                sb.open(cfg.login_url)
+            except Exception as e2:
+                log.debug("normal open also failed (attempt %d): %s", attempt, e2)
+                if attempt < max_retries:
+                    human_pause(2.0, 4.0)
+                    continue
+                return
+
+        human_pause(1.5, 3.0)
+
+        if _page_looks_blank_or_error(sb):
+            log.warning(
+                "Page blank/error after load (attempt %d/%d); retrying…",
+                attempt, max_retries
+            )
+            # Try a simple open as fallback
+            try:
+                sb.open(cfg.login_url)
+                human_pause(2.0, 4.0)
+            except Exception as e:
+                log.debug("fallback open failed: %s", e)
+
+            if _page_looks_blank_or_error(sb):
+                if attempt < max_retries:
+                    human_pause(3.0, 6.0)
+                    continue
+                log.error("Page still blank/error after %d attempts.", max_retries)
+            else:
+                log.info("Page loaded successfully via fallback open.")
+                return
+        else:
+            log.debug("Page loaded successfully (attempt %d).", attempt)
+            return
+
+
 def _solve_with_paid_service(sb, cfg) -> bool:
     """If a paid solver is configured, fetch a token and inject it. Returns True on success."""
     try:
@@ -172,7 +257,7 @@ def _pass_turnstile(sb, cfg) -> None:
             return
         # try a reconnect-open which often clears CF state
         try:
-            sb.uc_open_with_reconnect(cfg.login_url, 4)
+            _open_login_page(sb, cfg, reconnect_seconds=4)
         except Exception:
             pass
         human_pause(2, 4)
@@ -206,16 +291,63 @@ def _pass_turnstile(sb, cfg) -> None:
                     return
 
 
+
+def _dismiss_cookie_banner(sb) -> None:
+    """Close the OneTrust cookie consent overlay if present.
+
+    The banner sits on top of the form and blocks clicks on inputs and buttons.
+    We try to click "Accept All Cookies" (or the reject-all fallback) and then
+    wait for the banner to disappear.
+    """
+    btn = first_visible(sb, S.COOKIE_ACCEPT_BTN, timeout=3)
+    if not btn:
+        return
+    try:
+        sb.click(btn, by=by_of(btn))
+        log.debug("Cookie banner dismissed.")
+    except Exception as e:
+        log.debug("Could not click cookie accept button: %s", e)
+        # Try to remove the banner via JS as a last resort
+        try:
+            sb.execute_script(
+                'var b=document.getElementById("onetrust-banner-sdk");'
+                'if(b)b.remove();'
+            )
+        except Exception:
+            pass
+    human_pause(0.5, 1.0)
+
+
+def _wait_for_submit_enabled(sb, submit_sel: str, timeout: int = 15) -> None:
+    """Wait until the submit button loses its disabled attribute.
+
+    On the Russian portal the Sign-In button stays disabled until the
+    Turnstile captcha is successfully verified.  We poll the attribute so
+    the bot doesn't click a no-op button.
+    """
+    by = by_of(submit_sel)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            disabled = sb.get_attribute(submit_sel, "disabled", by=by)
+            if disabled is None or disabled == "false":
+                return  # button is enabled
+        except Exception:
+            return  # element gone / selector stale
+        time.sleep(0.5)
+    log.warning(
+        "Submit button still disabled after %ds - clicking anyway (Turnstile "
+        "may not have completed).", timeout
+    )
+
+
 def perform_login(sb, cfg) -> None:
     """Drive the full login. Assumes a fresh `sb` from open_browser()."""
     url = cfg.login_url
     log.info("Opening %s", url)
     # uc_open_with_reconnect briefly disconnects the driver so CF sees a "real"
     # navigation — this is the SB-recommended way to load CF-protected pages.
-    try:
-        sb.uc_open_with_reconnect(url, 5)
-    except Exception:
-        sb.open(url)
+    _open_login_page(sb, cfg)
     human_pause(2, 4)
 
     _check_edge_block(sb, cfg)
@@ -225,6 +357,9 @@ def perform_login(sb, cfg) -> None:
 
     _pass_turnstile(sb, cfg)
     _check_edge_block(sb, cfg)
+
+    # Dismiss cookie consent overlay (blocks form clicks if present)
+    _dismiss_cookie_banner(sb)
 
     # --- credentials -------------------------------------------------------
     email_sel = first_visible(sb, S.LOGIN_EMAIL, timeout=15)
@@ -253,6 +388,9 @@ def perform_login(sb, cfg) -> None:
     submit_sel = first_visible(sb, S.LOGIN_SUBMIT, timeout=8)
     if not submit_sel:
         raise LoginError("Could not find the Sign In button — update selectors.")
+    # On some portals (especially Russian), the submit button is disabled until
+    # the Turnstile captcha is verified. Wait for it to become enabled.
+    _wait_for_submit_enabled(sb, submit_sel, timeout=15)
     sb.click(submit_sel, by=by_of(submit_sel))
     log.info("Submitted login form.")
     human_pause(3, 6)

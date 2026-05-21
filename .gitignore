@@ -23,3 +23,4 @@ venv/
 logs/
 needed/
 .playwright-mcp/
+.codex_tmp/
