@@ -8,12 +8,19 @@ strings you need to put in config.yaml.
 """
 from __future__ import annotations
 
+import random
 import re
-import time
 from dataclasses import dataclass, field
 
 from . import selectors as S
-from .login import is_queue_page, wait_out_queue
+from .captcha import install_turnstile_hook, solve_cloudflare_clearance
+from .login import (
+    _solve_with_paid_service,
+    _try_uc_click,
+    _turnstile_present,
+    is_queue_page,
+    wait_out_queue,
+)
 from .util import (
     by_of,
     first_present,
@@ -73,6 +80,7 @@ def _pick_option(sb, value: str, label: str) -> None:
         if sb.is_element_present(xp, by="xpath"):
             sb.click(xp, by="xpath")
             human_pause(0.4, 1.0)
+            log.info("Selected %s: %s", label, value)
             return
     # couldn't find it — dump what's available to help the user
     opts = _read_open_options(sb)
@@ -117,17 +125,22 @@ def _close_overlay(sb) -> None:
 # --- navigation ------------------------------------------------------------
 def _go_to_booking_page(sb, cfg) -> None:
     """From the dashboard, click into the new-booking / schedule flow."""
+    install_turnstile_hook(sb)
     wait_out_queue(sb, cfg)
     btn = first_visible(sb, S.START_BOOKING_BTN, timeout=10)
     if btn:
         sb.click(btn, by=by_of(btn))
         human_pause(2, 4)
+        install_turnstile_hook(sb)
         wait_out_queue(sb, cfg)
     else:
         log.debug("No explicit 'start booking' button — assuming we're already on the form.")
 
 
 def _select_appointment_params(sb, cfg) -> None:
+    install_turnstile_hook(sb)
+    _handle_appointment_captcha(sb, cfg)
+
     appt = cfg.appointment
     # The three dropdowns. Some portals don't have a sub-category; skip if absent.
     _open_select(sb, S.SELECT_CENTRE_TRIGGER, "visa_centre")
@@ -143,12 +156,106 @@ def _select_appointment_params(sb, cfg) -> None:
             _open_select(sb, S.SELECT_SUBCATEGORY_TRIGGER, "visa_sub_category")
             _pick_option(sb, sub, "visa_sub_category")
 
-    # Some flows need a "Continue" before showing the calendar.
+    # Current VFS portals may show either "no slots" or the nearest slot as
+    # soon as the sub-category is selected. Decide that before clicking on.
+    _handle_appointment_captcha(sb, cfg)
+
+
+def _continue_after_params(sb, cfg) -> bool:
+    """Click a real enabled Continue button when the portal needs it."""
+    install_turnstile_hook(sb)
     cont = first_visible(sb, S.CONTINUE_BTN, timeout=3)
-    if cont:
-        sb.click(cont, by=by_of(cont))
+    if not cont:
+        return False
+    try:
+        disabled = sb.get_attribute(cont, "disabled", by=by_of(cont))
+        aria_disabled = sb.get_attribute(cont, "aria-disabled", by=by_of(cont))
+    except Exception:
+        disabled = aria_disabled = None
+    if disabled not in (None, "", "false") or aria_disabled == "true":
+        log.debug("Visible Continue control is disabled after parameter selection.")
+        return False
+
+    sb.click(cont, by=by_of(cont))
+    human_pause(2, 4)
+    wait_out_queue(sb, cfg)
+    _handle_appointment_captcha(sb, cfg)
+    return True
+
+
+def _handle_appointment_captcha(
+    sb,
+    cfg,
+    website_url: str = "https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable",
+) -> None:
+    """Handle the captcha modal that VFS can show after appointment params."""
+    install_turnstile_hook(sb)
+    hit = _visible_appointment_captcha(sb)
+    if not hit:
+        return
+
+    log.warning("Appointment captcha shown after selecting parameters; solving automatically.")
+    screenshot(sb, cfg.screenshot_dir, "appointment_captcha", cfg.screenshots_enabled)
+    _clear_appointment_turnstile(sb, cfg, website_url=website_url)
+
+    submit = first_visible(sb, S.CAPTCHA_SUBMIT_BTN, timeout=5)
+    if submit:
+        sb.click(submit, by=by_of(submit))
+        log.info("Submitted appointment captcha.")
         human_pause(2, 4)
         wait_out_queue(sb, cfg)
+
+    if _visible_appointment_captcha(sb):
+        screenshot(sb, cfg.screenshot_dir, "appointment_captcha_still_present", cfg.screenshots_enabled)
+        raise MonitorError("Appointment captcha is still present after automatic solving.")
+
+
+def _visible_appointment_captcha(sb) -> str | None:
+    for text in S.APPOINTMENT_CAPTCHA_TEXTS:
+        try:
+            if sb.is_text_visible(text):
+                return text
+        except Exception:
+            continue
+    for sel in (
+        "app-cloudflare-dialog",
+        "app-cloudflare-captcha-container",
+        "mat-dialog-container app-cloudflare-dialog",
+    ):
+        try:
+            for el in sb.find_elements(sel, by="css selector"):
+                if el.is_displayed():
+                    text = (el.text or "").strip()
+                    if text:
+                        return text
+        except Exception:
+            continue
+    return None
+
+
+def _clear_appointment_turnstile(
+    sb,
+    cfg,
+    website_url: str = "https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable",
+) -> None:
+    """Clear Turnstile on the current appointment page without navigating away."""
+    clearance_ok = cfg.captcha_enabled and solve_cloudflare_clearance(sb, cfg, website_url)
+    if clearance_ok:
+        log.info("Appointment Cloudflare API clearance injected.")
+
+    if not _turnstile_present(sb, timeout=2):
+        return
+
+    _try_uc_click(sb)
+    human_pause(1.5, 3.0)
+    if not _turnstile_present(sb, timeout=2):
+        log.info("Appointment captcha cleared by UC click.")
+        return
+
+    if cfg.captcha_enabled and _solve_with_paid_service(sb, cfg):
+        log.info("Appointment captcha token injected by paid solver.")
+        return
+    log.warning("Appointment captcha remains after automatic attempts.")
 
 
 # --- availability parsing --------------------------------------------------
@@ -222,15 +329,35 @@ def _collect_calendar_dates(sb, cfg, max_months: int = 3) -> list[str]:
     return uniq
 
 
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _date_set(value) -> set[str]:
+    if not value:
+        return set()
+    if isinstance(value, str):
+        return {part.strip() for part in value.split(",") if part.strip()}
+    return {str(part).strip() for part in value if str(part).strip()}
+
+
+def _is_iso_date(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", value or ""))
+
+
 def _filter_by_window(dates: list[str], cfg) -> list[str]:
     appt = cfg.appointment
-    lo = (appt.get("earliest_date") or "").strip()
-    hi = (appt.get("latest_date") or "").strip()
-    if not lo and not hi:
-        return dates
+    any_date = _truthy(appt.get("any_date", False))
+    lo = "" if any_date else (appt.get("earliest_date") or "").strip()
+    hi = "" if any_date else (appt.get("latest_date") or "").strip()
+    excluded = _date_set(appt.get("excluded_dates"))
     out = []
     for d in dates:
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+        if d in excluded:
+            continue
+        if not _is_iso_date(d):
             out.append(d)  # can't compare; don't drop it
             continue
         if lo and d < lo:
@@ -238,7 +365,39 @@ def _filter_by_window(dates: list[str], cfg) -> list[str]:
         if hi and d > hi:
             continue
         out.append(d)
-    return out
+
+    preference = str(appt.get("date_preference") or "").strip().lower()
+    if preference == "random":
+        random.shuffle(out)
+        return out
+    if preference not in {"earliest", "latest"}:
+        return out
+
+    iso = [d for d in out if _is_iso_date(d)]
+    other = [d for d in out if not _is_iso_date(d)]
+    iso.sort(reverse=preference == "latest")
+    return iso + other
+
+
+def _application_detail_slot_dates(sb) -> list[str] | None:
+    """Read the nearest slot banner shown on the current application-detail page.
+
+    Returns None when no nearest-slot banner is present. An empty list means
+    that the portal said a slot exists but the displayed date could not be
+    parsed from its current markup.
+    """
+    if not page_has_any_text(sb, S.NEAREST_SLOT_TEXTS):
+        return None
+    try:
+        src = sb.get_page_source()
+    except Exception:
+        return []
+    dates: list[str] = []
+    for day, month, year in re.findall(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", src):
+        date = f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+        if date not in dates:
+            dates.append(date)
+    return dates
 
 
 # --- public API ------------------------------------------------------------
@@ -247,6 +406,7 @@ def check_availability(sb, cfg) -> AvailabilityResult:
 
     Caller must already be logged in (perform_login done on this `sb`).
     """
+    install_turnstile_hook(sb)
     _go_to_booking_page(sb, cfg)
 
     # If just navigating dumped us in a queue and we couldn't get out:
@@ -262,7 +422,33 @@ def check_availability(sb, cfg) -> AvailabilityResult:
     human_pause(1.5, 3)
     wait_out_queue(sb, cfg)
 
-    # Explicit "no slots" message?
+    # Current VFS application-detail flows resolve availability immediately
+    # after the sub-category is selected, before a calendar is reachable.
+    no_slots_hit = page_has_any_text(sb, S.NO_SLOTS_TEXT)
+    if no_slots_hit:
+        return AvailabilityResult(available=False, note=f"portal says: {no_slots_hit}")
+
+    application_dates = _application_detail_slot_dates(sb)
+    if application_dates is not None:
+        dates = _filter_by_window(application_dates, cfg)
+        if application_dates and not dates:
+            return AvailabilityResult(
+                available=False,
+                note="nearest application-detail slot is outside configured date window",
+            )
+        screenshot(sb, cfg.screenshot_dir, "slots_found", cfg.screenshots_enabled)
+        return AvailabilityResult(
+            available=True,
+            dates=dates,
+            note="portal shows a nearest available slot before applicant details",
+            on_calendar=False,
+        )
+
+    # Other portal variants need Continue before a calendar / captcha appears.
+    _continue_after_params(sb, cfg)
+    human_pause(1.0, 2.0)
+    wait_out_queue(sb, cfg)
+
     no_slots_hit = page_has_any_text(sb, S.NO_SLOTS_TEXT)
     if no_slots_hit:
         return AvailabilityResult(available=False, note=f"portal says: {no_slots_hit}")

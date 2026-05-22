@@ -117,6 +117,18 @@ def main() -> int:
                 log.error("Password field NOT FOUND")
                 return 1
 
+            # VFS can inject Turnstile only after the Angular login form exists.
+            log.info("--- Step 6b: Rechecking Turnstile after form render ---")
+            human_pause(1.0, 2.0)
+            _pass_turnstile(sb, cfg)
+            _dismiss_cookie_banner(sb)
+            email_sel = first_visible(sb, S.LOGIN_EMAIL, timeout=15)
+            pwd_sel = first_visible(sb, S.LOGIN_PASSWORD, timeout=8)
+            if not email_sel or not pwd_sel:
+                log.error("Login fields disappeared after Turnstile handling")
+                screenshot(sb, cfg.screenshot_dir, "step6b_no_login_fields", True)
+                return 1
+
             # --- Step 7: Enter credentials ---
             log.info("--- Step 7: Entering credentials ---")
             sb.clear(email_sel, by=by_of(email_sel))

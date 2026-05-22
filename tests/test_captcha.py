@@ -100,6 +100,53 @@ def test_solve_turnstile_timeout():
     raise AssertionError("expected CaptchaError on timeout")
 
 
+def test_solve_cloudflare_challenge_happy_path():
+    cs = CapSolver("CAP-X", timeout_seconds=5)
+    create = _resp({"errorId": 0, "taskId": "cf-123"})
+    ready = _resp({
+        "errorId": 0,
+        "status": "ready",
+        "solution": {
+            "cookies": {"cf_clearance": "CLEARANCE"},
+            "token": "CLEARANCE",
+            "userAgent": "UA",
+        },
+    })
+    with mock.patch("bot.captcha.requests.post", side_effect=[create, ready]) as m, \
+         mock.patch("bot.captcha.time.sleep", return_value=None):
+        sol = cs.solve_cloudflare_challenge(
+            "https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable",
+            "user:pass@proxy.example:1000",
+            user_agent="UA",
+        )
+    assert sol["cookies"]["cf_clearance"] == "CLEARANCE"
+    task = m.call_args_list[0].kwargs["json"]["task"]
+    assert task["type"] == "AntiCloudflareTask"
+    assert task["proxy"] == "http://user:pass@proxy.example:1000"
+    assert task["userAgent"] == "UA"
+
+
+def test_solve_cloudflare_challenge_can_send_html():
+    cs = CapSolver("CAP-X", timeout_seconds=5)
+    create = _resp({"errorId": 0, "taskId": "cf-html"})
+    ready = _resp({
+        "errorId": 0,
+        "status": "ready",
+        "solution": {"token": "CLEARANCE"},
+    })
+    with mock.patch("bot.captcha.requests.post", side_effect=[create, ready]) as m, \
+         mock.patch("bot.captcha.time.sleep", return_value=None):
+        sol = cs.solve_cloudflare_challenge(
+            "https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable",
+            "http://user:pass@proxy.example:1000",
+            user_agent="UA",
+            html="<!DOCTYPE html><title>Just a moment...</title>",
+        )
+    assert sol["token"] == "CLEARANCE"
+    task = m.call_args_list[0].kwargs["json"]["task"]
+    assert task["html"].startswith("<!DOCTYPE html>")
+
+
 def test_solver_factory_unknown_provider():
     try:
         get_solver(fake_cfg(provider="nopecaptcha"))
@@ -125,6 +172,20 @@ def test_config_proxy_can_reference_named_env():
     cfg = Config(raw={"network": {"proxy": "env:VFS_PROXY_TEST"}})
     with mock.patch.dict("os.environ", {"VFS_PROXY_TEST": "user:pass@host:9000"}):
         assert cfg.proxy == "user:pass@host:9000"
+
+
+def test_config_captcha_proxy_defaults_to_network_proxy():
+    cfg = Config(raw={"network": {"proxy": "user:pass@host:9000"}, "captcha": {}})
+    assert cfg.captcha_proxy == "user:pass@host:9000"
+
+
+def test_config_captcha_proxy_can_reference_env():
+    cfg = Config(raw={
+        "network": {"proxy": "user:pass@host:9000"},
+        "captcha": {"proxy": "env:VFS_CAPTCHA_PROXY_TEST"},
+    })
+    with mock.patch.dict("os.environ", {"VFS_CAPTCHA_PROXY_TEST": "user2:pass2@host2:9001"}):
+        assert cfg.captcha_proxy == "user2:pass2@host2:9001"
 
 
 # --- runner ----------------------------------------------------------------

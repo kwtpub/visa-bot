@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 from datetime import datetime
@@ -89,7 +90,7 @@ def page_has_any_text(sb, texts: Iterable[str]) -> str | None:
 
 # --- screenshots -----------------------------------------------------------
 def screenshot(sb, directory: Path, name: str, enabled: bool = True) -> Path | None:
-    if not enabled:
+    if not enabled or os.getenv("VFS_SKIP_SCREENSHOTS", "").lower() in {"1", "true", "yes"}:
         return None
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)

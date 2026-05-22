@@ -52,6 +52,9 @@ appointment:
   # Leave empty to accept any available date.
   earliest_date: ""
   latest_date: ""
+  any_date: false               # true = ignore earliest_date/latest_date
+  excluded_dates: []            # e.g. ["2026-06-01", "2026-06-02"]
+  date_preference: "earliest"   # "earliest", "latest", "random", or empty
   # Number of applicants in this booking (usually 1).
   applicants_count: 1
 
@@ -74,6 +77,8 @@ applicants:
 behaviour:
   # false = only monitor + notify; true = also try to book the slot.
   auto_book: true
+  # true = walk the booking flow but stop before clicking final Confirm/Pay.
+  auto_book_dry_run: false
   # Seconds to wait between availability checks. DO NOT make this tiny —
   # VFS bans accounts for hammering. 600-1200s (10-20 min) is sane; with a
   # bit of jitter applied automatically.
@@ -97,6 +102,30 @@ network:
   headless: false
   # Pin a specific Chrome major version if SeleniumBase picks a wrong one.
   chrome_version: ""        # e.g. "126" — leave empty for auto
+  # Optional fixed Chrome profile dir. Usually leave empty; the bot creates a
+  # per-process profile under .tmp to avoid broken system temp permissions.
+  user_data_dir: ""
+  # Optional: attach to an already-open Chrome DevTools endpoint. Usually leave
+  # empty; can also be set via VFS_DEBUGGER_ADDRESS for recovery/debug sessions.
+  debugger_address: ""
+  # Optional: expose the SeleniumBase Chrome on a DevTools port for live
+  # inspection/debugging. Can also be set via VFS_REMOTE_DEBUG_PORT.
+  remote_debug_port: ""
+  # Fail fast if the configured proxy cannot reach a simple IP-check endpoint.
+  proxy_precheck: true
+  proxy_check_url: "https://api.ipify.org?format=json"
+  proxy_check_timeout_seconds: 20
+
+# --- Session reuse ----------------------------------------------------------
+# Optional: reuse a manually logged-in browser state instead of passing the
+# VFS login Turnstile every run. The file contains auth cookies/tokens and is
+# sensitive; keep it local. The default folder is git-ignored.
+session:
+  cookies_file: ""          # e.g. "saved_cookies/vfs_svn.json" or "env:VFS_SESSION_COOKIES"
+  import_cookies: true      # try this file before normal login
+  export_cookies: true      # refresh this file after a successful login/session
+  manual_login: false       # true = wait for you to log in before monitoring/booking
+  manual_login_wait_seconds: 300
 
 # --- Captcha solver (Cloudflare Turnstile) ----------------------------------
 # SeleniumBase UC mode tries to click the Turnstile checkbox automatically,
@@ -111,6 +140,8 @@ captcha:
   provider: "none"          # "none" | "capsolver"
   api_key: ""               # CapSolver key, "env:CAPSOLVER_API_KEY", or leave empty to read CAPSOLVER_API_KEY
   timeout_seconds: 120      # max time to wait for a token
+  cloudflare_retries: 2     # API challenge retries; second attempt sends fresh 403 HTML to CapSolver
+  proxy: ""                 # optional; must match the browser proxy when solving Cloudflare API challenges
 
 # --- Telegram notifications (optional) --------------------------------------
 # Create a bot via @BotFather, get its token; get your chat id from @userinfobot.

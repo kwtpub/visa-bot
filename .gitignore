@@ -7,6 +7,8 @@ config.yaml
 downloaded_files/
 latest_logs/
 assets/
+.tmp/
+.tmp_selenium_profile/
 *.png
 screenshots/
 saved_cookies/

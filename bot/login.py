@@ -11,12 +11,15 @@ import time
 from . import selectors as S
 from .captcha import (
     CaptchaError,
+    extract_turnstile_metadata,
     extract_turnstile_sitekey,
     get_solver,
+    install_turnstile_hook,
     inject_turnstile_token,
     page_url as _page_url,
 )
 from .otp import fill_otp_into_page, get_otp
+from .session import load_browser_state, save_browser_state
 from .util import (
     by_of,
     first_present,
@@ -87,23 +90,124 @@ def wait_out_queue(sb, cfg, max_wait: int = 600) -> bool:
     return False
 
 
-def looks_logged_in(sb) -> bool:
-    """Heuristic: we see a 'start booking' control or a URL past /login."""
+LOGGED_IN_URL_MARKERS = (
+    "/dashboard",
+    "/schedule-appointment",
+    "/appointment",
+    "/application-detail",
+)
+LOGGED_IN_TITLE_MARKERS = (
+    "dashboard",
+    "\u043f\u0430\u043d\u0435\u043b\u044c \u0438\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442\u043e\u0432",
+)
+LOGGED_IN_TEXT_MARKERS = (
+    "Logout",
+    "Log Out",
+    "\u0412\u044b\u0439\u0442\u0438",
+    "\u0417\u0430\u043f\u0438\u0441\u0430\u0442\u044c\u0441\u044f \u043d\u0430 \u043f\u0440\u0438\u0435\u043c",
+    "\u0417\u0430\u043f\u0438\u0441\u0430\u0442\u044c\u0441\u044f \u043d\u0430 \u043f\u0440\u0438\u0451\u043c",
+)
+INVALID_SESSION_TEXT_MARKERS = (
+    "session expired",
+    "session is invalid",
+    "invalid session",
+    "\u0441\u0435\u0441\u0441\u0438\u044f \u0438\u0441\u0442\u0435\u043a\u043b\u0430",
+    "\u0441\u0435\u0430\u043d\u0441 \u0438\u0441\u0442\u0451\u043a",
+    "\u043d\u0435\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0442\u0435\u043b\u0435\u043d",
+    "\u043d\u0435\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0442\u0435\u043b\u044c\u043d",
+)
+ACCESS_RESTRICTED_TEXT_MARKERS = (
+    "access restricted for user id",
+    "restricted for user id",
+    "429001",
+    "\u0434\u043e\u0441\u0442\u0443\u043f \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d \u0434\u043b\u044f \u0438\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440\u0430 \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044f",
+    "\u043d\u0435\u043e\u0431\u044b\u0447\u043d\u0443\u044e \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u044c",
+    "\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0438\u043b\u0438 \u0434\u043e\u0441\u0442\u0443\u043f",
+)
+
+
+def _page_haystack(sb) -> str:
     try:
         url = (sb.get_current_url() or "").lower()
     except Exception:
         url = ""
-    if "/login" not in url and "vfsglobal.com" in url:
-        # could be dashboard / schedule page
-        if first_present(sb, S.START_BOOKING_BTN, timeout=2):
-            return True
-        # generic: a logout link usually means we're in
+    try:
+        title = (sb.get_title() or "").lower()
+    except Exception:
+        title = ""
+    try:
+        body = (sb.get_text("body", by="css selector") or "").lower()
+    except Exception:
         try:
-            if sb.is_text_visible("Logout") or sb.is_text_visible("Log Out"):
+            body = (sb.get_page_source() or "").lower()
+        except Exception:
+            body = ""
+    return "\n".join((url, title, body))
+
+
+def _access_restricted(sb) -> bool:
+    haystack = _page_haystack(sb)
+    return any(marker in haystack for marker in ACCESS_RESTRICTED_TEXT_MARKERS)
+
+
+def _check_access_restricted(sb, cfg) -> None:
+    if not _access_restricted(sb):
+        return
+    screenshot(sb, cfg.screenshot_dir, "access_restricted_429001", cfg.screenshots_enabled)
+    raise RateLimited(
+        "VFS restricted this user ID/account (429001) after login. "
+        "Wait/unlock the account or use a different account before retrying."
+    )
+
+
+def _session_invalid(sb) -> bool:
+    haystack = _page_haystack(sb)
+    url = haystack.split("\n", 1)[0]
+    if "page-not-found" in url and ("401" in haystack or "session" in haystack or "\u0441\u0435\u0441\u0441" in haystack):
+        return True
+    return any(marker in haystack for marker in INVALID_SESSION_TEXT_MARKERS)
+
+
+def _is_login_url(url: str) -> bool:
+    return "/login" in (url or "").lower()
+
+
+def looks_logged_in(sb) -> bool:
+    """Heuristic: dashboard URL/title, visible logout text, or a visible booking control."""
+    if _access_restricted(sb):
+        return False
+    if _session_invalid(sb):
+        return False
+    try:
+        url = (sb.get_current_url() or "").lower()
+    except Exception:
+        url = ""
+    if _is_login_url(url):
+        return False
+    if "vfsglobal.com" in url and any(marker in url for marker in LOGGED_IN_URL_MARKERS):
+        return True
+
+    try:
+        title = (sb.get_title() or "").lower()
+    except Exception:
+        try:
+            title = (sb.driver.title or "").lower()
+        except Exception:
+            title = ""
+    if any(marker in title for marker in LOGGED_IN_TITLE_MARKERS):
+        return True
+
+    if "vfsglobal.com" in url:
+        # could be dashboard / schedule page
+        if first_visible(sb, S.START_BOOKING_BTN, timeout=2):
+            return True
+        # generic: a logout link or booking label usually means we're in
+        try:
+            if any(sb.is_text_visible(text) for text in LOGGED_IN_TEXT_MARKERS):
                 return True
         except Exception:
             pass
-    return bool(first_present(sb, S.START_BOOKING_BTN, timeout=2))
+    return False
 
 
 # --- the flow --------------------------------------------------------------
@@ -118,6 +222,24 @@ def _try_uc_click(sb) -> None:
             return
         except Exception as e:
             log.debug("%s failed: %s", fn_name, e)
+
+
+def _turnstile_present(sb, timeout: float = 3.0) -> bool:
+    """Detect Turnstile even when Cloudflare renders it in a closed shadow root."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if first_present(sb, S.TURNSTILE_IFRAME, timeout=0.25):
+            return True
+        try:
+            src = (sb.get_page_source() or "").lower()
+        except Exception:
+            src = ""
+        if "challenges.cloudflare.com" in src and (
+            "turnstile" in src or "cf-turnstile-response" in src
+        ):
+            return True
+        time.sleep(0.25)
+    return False
 
 
 def _page_looks_blank_or_error(sb) -> bool:
@@ -207,6 +329,7 @@ def _open_login_page(sb, cfg, reconnect_seconds: int = 5) -> None:
 
 def _solve_with_paid_service(sb, cfg) -> bool:
     """If a paid solver is configured, fetch a token and inject it. Returns True on success."""
+    install_turnstile_hook(sb)
     try:
         solver = get_solver(cfg)
     except CaptchaError as e:
@@ -219,11 +342,18 @@ def _solve_with_paid_service(sb, cfg) -> bool:
     if not sitekey:
         log.warning("Paid solver configured but couldn't find the Turnstile sitekey on the page.")
         return False
+    meta = extract_turnstile_metadata(sb)
+    sitekey = meta.get("sitekey") or sitekey
     url = _page_url(sb) or cfg.login_url
     log.info("Asking %s to solve Turnstile (sitekey=%s…, url=%s)",
              cfg.captcha_provider, sitekey[:12], url)
     try:
-        token = solver.solve_turnstile(sitekey, url)
+        token = solver.solve_turnstile(
+            sitekey,
+            url,
+            action=meta.get("action") or None,
+            cdata=meta.get("cData") or None,
+        )
     except CaptchaError as e:
         log.error("Captcha solver failed: %s", e)
         return False
@@ -244,15 +374,16 @@ def _pass_turnstile(sb, cfg) -> None:
          inject into the page.
       3) Manual fallback when running with --show: give the human ~90s to click.
     """
+    install_turnstile_hook(sb)
     # Nothing on page at all -> done.
-    if not first_present(sb, S.TURNSTILE_IFRAME, timeout=3):
+    if not _turnstile_present(sb, timeout=3):
         return
 
     log.info("Cloudflare Turnstile present — attempting UC click…")
     for attempt in range(2):
         _try_uc_click(sb)
         human_pause(1.5, 3.0)
-        if not first_present(sb, S.TURNSTILE_IFRAME, timeout=2):
+        if not _turnstile_present(sb, timeout=2):
             log.info("Turnstile cleared by UC-mode.")
             return
         # try a reconnect-open which often clears CF state
@@ -261,7 +392,7 @@ def _pass_turnstile(sb, cfg) -> None:
         except Exception:
             pass
         human_pause(2, 4)
-        if not first_present(sb, S.TURNSTILE_IFRAME, timeout=2):
+        if not _turnstile_present(sb, timeout=2):
             log.info("Turnstile cleared after reconnect.")
             return
 
@@ -271,7 +402,7 @@ def _pass_turnstile(sb, cfg) -> None:
         if _solve_with_paid_service(sb, cfg):
             # Give the page a moment to validate the token
             for _ in range(6):
-                if not first_present(sb, S.TURNSTILE_IFRAME, timeout=1):
+                if not _turnstile_present(sb, timeout=1):
                     log.info("Turnstile cleared by paid solver.")
                     return
                 time.sleep(1)
@@ -281,12 +412,12 @@ def _pass_turnstile(sb, cfg) -> None:
         # solver returned False -> fall through to manual
 
     # Last resort: manual.
-    if first_present(sb, S.TURNSTILE_IFRAME, timeout=2):
+    if _turnstile_present(sb, timeout=2):
         log.warning("Turnstile still showing. If running with --show, solve it manually now…")
         if not cfg.headless:
             for _ in range(18):
                 time.sleep(5)
-                if not first_present(sb, S.TURNSTILE_IFRAME, timeout=1):
+                if not _turnstile_present(sb, timeout=1):
                     log.info("Turnstile cleared (manually).")
                     return
 
@@ -343,6 +474,33 @@ def _wait_for_submit_enabled(sb, submit_sel: str, timeout: int = 15) -> None:
 
 def perform_login(sb, cfg) -> None:
     """Drive the full login. Assumes a fresh `sb` from open_browser()."""
+    state_file = cfg.session_state_file
+    if looks_logged_in(sb):
+        log.info("Browser already appears logged in; skipping login form.")
+        if state_file and cfg.session_export_enabled:
+            save_browser_state(sb, cfg, state_file)
+        return
+
+    if state_file and cfg.session_import_enabled:
+        if load_browser_state(sb, cfg, state_file):
+            try:
+                sb.open(cfg.login_url)
+            except Exception:
+                pass
+            human_pause(2, 4)
+            _check_edge_block(sb, cfg)
+            wait_out_queue(sb, cfg)
+            if looks_logged_in(sb):
+                log.info("Reused saved VFS session; skipping login form.")
+                if cfg.session_export_enabled:
+                    save_browser_state(sb, cfg, state_file)
+                return
+            log.info("Saved VFS session is not logged in; falling back to normal login.")
+
+    if cfg.manual_login_enabled:
+        wait_for_manual_login(sb, cfg, state_file=state_file)
+        return
+
     url = cfg.login_url
     log.info("Opening %s", url)
     # uc_open_with_reconnect briefly disconnects the driver so CF sees a "real"
@@ -373,6 +531,18 @@ def perform_login(sb, cfg) -> None:
             "Could not find the login form. The page layout may have changed "
             "(update bot/selectors.py LOGIN_EMAIL) or a challenge is blocking it."
         )
+
+    # VFS often injects the Turnstile iframe only after Angular has rendered
+    # the login form. The earlier page-level check can miss it.
+    human_pause(1.0, 2.0)
+    _pass_turnstile(sb, cfg)
+    _check_edge_block(sb, cfg)
+    _dismiss_cookie_banner(sb)
+
+    email_sel = first_visible(sb, S.LOGIN_EMAIL, timeout=15)
+    if not email_sel:
+        screenshot(sb, cfg.screenshot_dir, "no_login_form_after_turnstile", cfg.screenshots_enabled)
+        raise LoginError("Could not find the login form after Turnstile handling.")
     pwd_sel = first_visible(sb, S.LOGIN_PASSWORD, timeout=8)
     if not pwd_sel:
         raise LoginError("Found email field but not password field — update selectors.")
@@ -398,6 +568,7 @@ def perform_login(sb, cfg) -> None:
     # Possible immediate outcomes: error banner, OTP screen, queue, dashboard.
     _check_edge_block(sb, cfg)
     wait_out_queue(sb, cfg)
+    _check_access_restricted(sb, cfg)
 
     err = first_visible(sb, S.LOGIN_ERROR, timeout=4)
     if err:
@@ -423,6 +594,7 @@ def perform_login(sb, cfg) -> None:
         human_pause(3, 6)
         _check_edge_block(sb, cfg)
         wait_out_queue(sb, cfg)
+        _check_access_restricted(sb, cfg)
         # a wrong OTP usually re-shows the field with an error
         if first_visible(sb, S.OTP_INPUT, timeout=3):
             err2 = first_visible(sb, S.LOGIN_ERROR, timeout=2)
@@ -451,3 +623,47 @@ def perform_login(sb, cfg) -> None:
         )
     else:
         log.info("Login successful — on the dashboard.")
+
+    if state_file and cfg.session_export_enabled:
+        save_browser_state(sb, cfg, state_file)
+
+
+def wait_for_manual_login(sb, cfg, *, state_file=None, timeout_seconds: int | None = None) -> None:
+    """Open VFS and wait until the operator finishes logging in."""
+    timeout = int(timeout_seconds or cfg.manual_login_wait_seconds)
+    log.info("Opening %s for manual login; waiting up to %ds.", cfg.login_url, timeout)
+    _open_login_page(sb, cfg)
+    human_pause(2, 4)
+    _check_edge_block(sb, cfg)
+    wait_out_queue(sb, cfg, max_wait=min(timeout, 600))
+    _check_edge_block(sb, cfg)
+    _dismiss_cookie_banner(sb)
+
+    deadline = time.time() + timeout
+    last_log = 0.0
+    last_invalid_log = 0.0
+    while time.time() < deadline:
+        _check_access_restricted(sb, cfg)
+        if _session_invalid(sb):
+            now = time.time()
+            if now - last_invalid_log > 30:
+                log.warning("VFS reports an expired/invalid session; reopening login page.")
+                last_invalid_log = now
+            _open_login_page(sb, cfg)
+            human_pause(2, 4)
+            continue
+        if looks_logged_in(sb):
+            log.info("Manual VFS login detected.")
+            if state_file and cfg.session_export_enabled:
+                save_browser_state(sb, cfg, state_file)
+            return
+
+        now = time.time()
+        if now - last_log > 30:
+            remaining = max(0, int(deadline - now))
+            log.info("Waiting for manual VFS login... %ds left.", remaining)
+            last_log = now
+        time.sleep(5)
+
+    screenshot(sb, cfg.screenshot_dir, "manual_login_timeout", cfg.screenshots_enabled)
+    raise LoginError(f"Timed out waiting {timeout}s for manual VFS login.")

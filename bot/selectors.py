@@ -105,6 +105,9 @@ OTP_RESEND = [
 # ---------------------------------------------------------------------------
 START_BOOKING_BTN = [
     '//button[contains(., "Start New Booking") or contains(., "Book Appointment") or contains(., "New Booking")]',
+    '//button[contains(normalize-space(), "\u0417\u0430\u043f\u0438\u0441")]',
+    '//*[(@role="button" or self::a) and contains(normalize-space(), "\u0417\u0430\u043f\u0438\u0441")]',
+    '//*[self::button or self::a][contains(., "\u0417\u0430\u043f\u0438\u0441\u0430\u0442\u044c\u0441\u044f \u043d\u0430 \u043f\u0440\u0438\u0435\u043c") or contains(., "\u0417\u0430\u043f\u0438\u0441\u0430\u0442\u044c\u0441\u044f \u043d\u0430 \u043f\u0440\u0438\u0451\u043c")]',
     'a[href*="schedule-appointment"]',
     'button.btn-book',
 ]
@@ -115,20 +118,23 @@ START_BOOKING_BTN = [
 # ---------------------------------------------------------------------------
 # Triggers (the visible dropdown box):
 SELECT_CENTRE_TRIGGER = [
+    'mat-select[formcontrolname="centerCode"]',
     'mat-select[formcontrolname="centre"]',
     'mat-select[formcontrolname="visaApplicationCentre"]',
     '#mat-select-0',
-    '//mat-label[contains(., "Centre") or contains(., "Center")]/ancestor::mat-form-field//mat-select',
+    '//mat-label[contains(., "Centre") or contains(., "Center") or contains(., "\u0426\u0435\u043d\u0442\u0440")]/ancestor::mat-form-field//mat-select',
 ]
 SELECT_CATEGORY_TRIGGER = [
+    'mat-select[formcontrolname="selectedSubvisaCategory"]',
     'mat-select[formcontrolname="category"]',
     'mat-select[formcontrolname="visaCategory"]',
-    '//mat-label[contains(., "Category")]/ancestor::mat-form-field//mat-select',
+    '//mat-label[contains(., "Category") or contains(., "\u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u044e \u0437\u0430\u043f\u0438\u0441\u0438")]/ancestor::mat-form-field//mat-select',
 ]
 SELECT_SUBCATEGORY_TRIGGER = [
+    'mat-select[formcontrolname="visaCategoryCode"]',
     'mat-select[formcontrolname="subCategory"]',
     'mat-select[formcontrolname="visaSubCategory"]',
-    '//mat-label[contains(., "Sub") or contains(., "Sub-category") or contains(., "Sub category")]/ancestor::mat-form-field//mat-select',
+    '//mat-label[contains(., "Sub") or contains(., "Sub-category") or contains(., "Sub category") or contains(., "\u043f\u043e\u0434\u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u044e")]/ancestor::mat-form-field//mat-select',
 ]
 # The popup panel that opens, and an individual option inside it:
 MAT_OPTION_PANEL = ['div.cdk-overlay-pane', 'div.mat-select-panel', 'div[role="listbox"]']
@@ -137,6 +143,16 @@ MAT_OPTION_ANY = ['mat-option', 'mat-option span.mat-option-text', '[role="optio
 
 CONTINUE_BTN = [
     '//button[contains(., "Continue") or contains(., "Submit") or contains(., "Proceed") or contains(., "Next")]',
+    '//button[contains(., "\u041f\u0440\u043e\u0434\u043e\u043b\u0436\u0438\u0442\u044c")]',
+]
+
+APPOINTMENT_CAPTCHA_TEXTS = [
+    "\u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u0435 \u043a\u0430\u043f\u0447\u0443",
+    "Verify you are human",
+]
+CAPTCHA_SUBMIT_BTN = [
+    '//button[normalize-space()="Submit"]',
+    '//button[contains(., "Submit")]',
     'button[type="submit"]',
 ]
 
@@ -150,6 +166,15 @@ NO_SLOTS_TEXT = [
     "currently no appointments",
     "no dates available",
     "appointments are not available",
+    # Current rus/ru/svn application-detail message:
+    "\u043d\u0435\u0442 \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b\u0445 \u0441\u043b\u043e\u0442\u043e\u0432",
+]
+# On the current VFS application-detail page, selecting a category can show
+# the nearest slot before the flow enters applicant details / the calendar.
+NEAREST_SLOT_TEXTS = [
+    "Nearest available slot",
+    "Next available slot",
+    "\u0411\u043b\u0438\u0436\u0430\u0439\u0448\u0438\u0439 \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b\u0439 \u0441\u043b\u043e\u0442",
 ]
 # Calendar widget + day cells that are selectable (free) vs disabled:
 CALENDAR_ROOT = ['mat-calendar', '.mat-calendar', 'div.calendar']
@@ -192,16 +217,63 @@ QUEUE_PAGE_HOSTS = ["queue-it.net", "vfsglobal.queue-it.net"]
 # the bot fills whichever of these it finds and leaves the rest for you.
 # ---------------------------------------------------------------------------
 APPLICANT_FIELDS = {
-    "first_name": ['input[formcontrolname="firstName"]', 'input[name="firstName"]', '#firstName'],
-    "last_name": ['input[formcontrolname="lastName"]', 'input[name="lastName"]', '#lastName'],
-    "passport_number": ['input[formcontrolname="passportNumber"]', 'input[name="passportNumber"]', '#passportNumber'],
+    "first_name": [
+        'input[formcontrolname="firstName"]',
+        'input[name="firstName"]',
+        '#firstName',
+        'input[placeholder*="\u0438\u043c\u044f"]',
+    ],
+    "last_name": [
+        'input[formcontrolname="lastName"]',
+        'input[name="lastName"]',
+        '#lastName',
+        'input[placeholder*="\u0444\u0430\u043c\u0438\u043b"]',
+    ],
+    "passport_number": [
+        'input[formcontrolname="passportNumber"]',
+        'input[name="passportNumber"]',
+        '#passportNumber',
+        'input[placeholder*="\u043d\u043e\u043c\u0435\u0440 \u043f\u0430\u0441\u043f\u043e\u0440\u0442"]',
+    ],
     "passport_expiry": ['input[formcontrolname="passportExpiryDate"]', 'input[name="passportExpiry"]', '#passportExpiry'],
     "date_of_birth": ['input[formcontrolname="dateOfBirth"]', 'input[name="dateOfBirth"]', '#dateOfBirth'],
-    "phone_number": ['input[formcontrolname="contactNumber"]', 'input[name="phone"]', '#phone'],
-    "email": ['input[formcontrolname="email"]', 'input[name="email"]', '#email'],
+    "phone_country_code": [
+        'input[formcontrolname="phoneCountryCode"]',
+        'input[name="phoneCountryCode"]',
+        '//app-dynamic-control[contains(., "\u041a\u043e\u043d\u0442\u0430\u043a\u0442\u043d\u044b\u0439 \u043d\u043e\u043c\u0435\u0440")]//input[@maxlength="3"]',
+    ],
+    "phone_number": [
+        'input[formcontrolname="contactNumber"]',
+        'input[name="phone"]',
+        '#phone',
+        '//app-dynamic-control[contains(., "\u041a\u043e\u043d\u0442\u0430\u043a\u0442\u043d\u044b\u0439 \u043d\u043e\u043c\u0435\u0440")]//input[@maxlength="15"]',
+    ],
+    "email": ['input[formcontrolname="email"]', 'input[name="email"]', '#email', 'input[type="email"]'],
 }
-APPLICANT_GENDER_SELECT = ['mat-select[formcontrolname="gender"]', 'select[name="gender"]']
-APPLICANT_NATIONALITY_SELECT = ['mat-select[formcontrolname="nationality"]', 'select[name="nationality"]']
+APPLICANT_GENDER_SELECT = [
+    'mat-select[formcontrolname="gender"]',
+    'select[name="gender"]',
+    '//app-dynamic-control[contains(., "\u041f\u043e\u043b")]//mat-select',
+]
+APPLICANT_NATIONALITY_SELECT = [
+    'mat-select[formcontrolname="nationality"]',
+    'select[name="nationality"]',
+    '//app-dynamic-control[contains(., "\u0433\u0440\u0430\u0436\u0434\u0430\u043d\u0441\u0442\u0432\u043e")]//mat-select',
+]
+YOUR_DETAILS_PAGE = [
+    '#dateOfBirth',
+    '//app-dynamic-control[contains(., "\u041d\u043e\u043c\u0435\u0440 \u043f\u0430\u0441\u043f\u043e\u0440\u0442\u0430")]',
+]
+YOUR_DETAILS_SAVE_BTN = [
+    '//button[contains(., "Save")]',
+    '//button[contains(., "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c")]',
+]
+ADD_APPLICANT_BTN = [
+    '//button[contains(., "Add Applicant") or contains(., "Add applicant") or contains(., "Add another applicant")]',
+    '//a[contains(., "Add Applicant") or contains(., "Add applicant") or contains(., "Add another applicant")]',
+    '//button[contains(., "\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0437\u0430\u044f\u0432\u0438\u0442\u0435\u043b\u044f") or contains(., "\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0435\u0449\u0435") or contains(., "\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0435\u0449\u0451")]',
+    '//a[contains(., "\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0437\u0430\u044f\u0432\u0438\u0442\u0435\u043b\u044f") or contains(., "\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0435\u0449\u0435") or contains(., "\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0435\u0449\u0451")]',
+]
 
 # Final review / confirm:
 REVIEW_CONFIRM_BTN = [

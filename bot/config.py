@@ -53,6 +53,10 @@ class Config:
         return int(self.raw["behaviour"].get("stop_after_bookings", 0))
 
     @property
+    def auto_book_dry_run(self) -> bool:
+        return bool(self.raw.get("behaviour", {}).get("auto_book_dry_run", False))
+
+    @property
     def relogin_after_failures(self) -> int:
         return int(self.raw["behaviour"].get("relogin_after_failures", 3))
 
@@ -72,6 +76,71 @@ class Config:
     def chrome_version(self) -> str:
         return str(self.raw.get("network", {}).get("chrome_version") or "").strip()
 
+    @property
+    def debugger_address(self) -> str:
+        return str(
+            self.raw.get("network", {}).get("debugger_address")
+            or os.getenv("VFS_DEBUGGER_ADDRESS", "")
+        ).strip()
+
+    @property
+    def remote_debug_port(self) -> int:
+        value = str(
+            self.raw.get("network", {}).get("remote_debug_port")
+            or os.getenv("VFS_REMOTE_DEBUG_PORT", "")
+        ).strip()
+        if not value:
+            return 0
+        return int(value)
+
+    @property
+    def proxy_precheck_enabled(self) -> bool:
+        return bool(self.raw.get("network", {}).get("proxy_precheck", True))
+
+    @property
+    def proxy_check_url(self) -> str:
+        return str(
+            self.raw.get("network", {}).get("proxy_check_url")
+            or "https://api.ipify.org?format=json"
+        ).strip()
+
+    @property
+    def proxy_check_timeout(self) -> int:
+        return int(self.raw.get("network", {}).get("proxy_check_timeout_seconds", 20))
+
+    # --- session reuse -----------------------------------------------------
+    @property
+    def session_state_file(self) -> Path | None:
+        value = str(
+            self.raw.get("session", {}).get("cookies_file")
+            or os.getenv("VFS_SESSION_COOKIES", "")
+        ).strip()
+        if value.lower().startswith("env:"):
+            env_name = value.split(":", 1)[1].strip()
+            value = os.getenv(env_name, "").strip()
+        if not value:
+            return None
+        p = Path(value)
+        if not p.is_absolute():
+            p = Path(__file__).resolve().parent.parent / p
+        return p
+
+    @property
+    def session_import_enabled(self) -> bool:
+        return bool(self.raw.get("session", {}).get("import_cookies", True))
+
+    @property
+    def session_export_enabled(self) -> bool:
+        return bool(self.raw.get("session", {}).get("export_cookies", True))
+
+    @property
+    def manual_login_enabled(self) -> bool:
+        return bool(self.raw.get("session", {}).get("manual_login", False))
+
+    @property
+    def manual_login_wait_seconds(self) -> int:
+        return int(self.raw.get("session", {}).get("manual_login_wait_seconds", 300))
+
     # --- captcha ----------------------------------------------------------
     @property
     def captcha_provider(self) -> str:
@@ -90,6 +159,18 @@ class Config:
         return int(self.raw.get("captcha", {}).get("timeout_seconds", 120))
 
     @property
+    def captcha_proxy(self) -> str:
+        value = str(
+            self.raw.get("captcha", {}).get("proxy")
+            or self.raw.get("captcha", {}).get("cloudflare_proxy")
+            or os.getenv("VFS_CAPTCHA_PROXY", "")
+        ).strip()
+        if value.lower().startswith("env:"):
+            env_name = value.split(":", 1)[1].strip()
+            value = os.getenv(env_name, "").strip()
+        return value or self.proxy
+
+    @property
     def captcha_enabled(self) -> bool:
         return self.captcha_provider not in ("none", "off", "") and bool(self.captcha_api_key)
 
@@ -98,8 +179,14 @@ class Config:
         return self.raw["appointment"]
 
     @property
+    def applicants_count(self) -> int:
+        appt = self.appointment
+        value = appt.get("applicants_count") or len(self.applicants) or 1
+        return max(1, int(value))
+
+    @property
     def applicants(self) -> list[dict[str, Any]]:
-        return self.raw.get("applicants", [])
+        return self.raw.get("applicants") or []
 
     @property
     def otp_mode(self) -> str:
@@ -174,10 +261,17 @@ def load_config(path: Path | None = None) -> Config:
 
     cfg = Config(raw=raw)
 
-    if cfg.auto_book and not cfg.applicants:
+    booking_enabled = cfg.auto_book or cfg.auto_book_dry_run
+    if booking_enabled and not cfg.applicants:
         print(
             "[config] WARNING: auto_book is true but 'applicants:' is empty — "
             "booking will only work if the portal pre-fills applicant data.",
+            file=sys.stderr,
+        )
+    elif booking_enabled and cfg.applicants_count > len(cfg.applicants):
+        print(
+            f"[config] WARNING: applicants_count={cfg.applicants_count} but "
+            f"only {len(cfg.applicants)} applicant record(s) are configured.",
             file=sys.stderr,
         )
     if not cfg.proxy:

@@ -78,6 +78,36 @@ python -m bot.main --once
 python -m bot.main --show
 ```
 
+## Reuse a logged-in session
+
+If the login Turnstile is the only blocker, log in once manually and save the
+browser state:
+
+```powershell
+.\.venv\Scripts\python.exe -m bot.main --save-cookies saved_cookies\vfs_svn.json --show
+```
+
+Then run the bot with that state file:
+
+```powershell
+.\.venv\Scripts\python.exe -m bot.main --cookies saved_cookies\vfs_svn.json --once
+```
+
+Or make the normal run wait for you to log in and then continue into the
+monitoring/booking loop:
+
+```yaml
+session:
+  cookies_file: "saved_cookies/vfs_svn.json"
+  import_cookies: true
+  export_cookies: true
+  manual_login: true
+  manual_login_wait_seconds: 300
+```
+
+The file contains auth cookies/tokens, so keep it local. `saved_cookies/` is
+already ignored by git.
+
 ## Cloudflare Turnstile (paid solver)
 
 The free `sb.uc_gui_click_captcha()` helper sometimes can't get past Turnstile
