@@ -1,9 +1,10 @@
 """Retrieve the one-time code VFS sends by email (or SMS).
 
-Two strategies:
+Strategies:
   - manual : block and ask the operator to type the code in the terminal.
   - imap   : poll an IMAP mailbox for a recent message from VFS and extract
              the first 4–8 digit code from it.
+  - notletters : poll the NotLetters API for a recent VFS message.
 
 The IMAP path is best-effort: if it can't find a code in time it falls back
 to asking on the console, so the bot never silently stalls.
@@ -11,15 +12,23 @@ to asking on the console, so the bot never silently stalls.
 from __future__ import annotations
 
 import email
+import html
 import imaplib
 import re
 import time
 from email.header import decode_header
 from typing import Any
 
+import requests
+
 from .util import log
 
 _CODE_RE = re.compile(r"\b(\d{4,8})\b")
+_LINK_RE = re.compile(r"https?://[^\s\"'<>]+", re.I)
+
+
+class OTPError(RuntimeError):
+    """OTP could not be retrieved automatically."""
 
 
 def get_otp(cfg, *, prompt: str = "Enter the OTP code VFS just sent you") -> str:
@@ -30,7 +39,37 @@ def get_otp(cfg, *, prompt: str = "Enter the OTP code VFS just sent you") -> str
             log.info("Got OTP %s from mailbox.", _mask(code))
             return code
         log.warning("Could not read OTP from mailbox in time — falling back to manual input.")
+    if mode == "notletters":
+        code = _get_otp_via_notletters(cfg.notletters_cfg)
+        if code:
+            log.info("Got OTP %s from NotLetters.", _mask(code))
+            return code
+        raise OTPError("Could not read OTP through NotLetters in time.")
     return _ask_console(prompt)
+
+
+def get_email_link(
+    cfg,
+    *,
+    href_contains: str = "activateemail",
+    search: str = "VFS",
+    from_contains: str = "vfsglobal",
+    wait_seconds: int | None = None,
+) -> str | None:
+    """Poll the configured NotLetters mailbox for a recent VFS link."""
+    mode = (cfg.otp_mode or "manual").lower()
+    if mode != "notletters":
+        raise OTPError("Automatic email-link retrieval requires otp.mode='notletters'.")
+
+    api_cfg = dict(cfg.notletters_cfg)
+    if wait_seconds is not None:
+        api_cfg["wait_seconds"] = wait_seconds
+    return _get_link_via_notletters(
+        api_cfg,
+        href_contains=href_contains,
+        search=search,
+        from_contains=from_contains,
+    )
 
 
 # --- manual ----------------------------------------------------------------
@@ -134,10 +173,201 @@ def _get_otp_via_imap(imap_cfg: dict[str, Any]) -> str | None:
     return None
 
 
+def _get_otp_via_notletters(api_cfg: dict[str, Any]) -> str | None:
+    api_key = str(api_cfg.get("api_key") or "").strip()
+    mailbox = str(api_cfg.get("email") or "").strip()
+    password = str(api_cfg.get("password") or "").strip()
+    if not api_key or not mailbox or not password:
+        log.warning("NotLetters OTP is not fully configured.")
+        return None
+
+    base_url = str(api_cfg.get("base_url") or "https://api.notletters.com").rstrip("/")
+    wait_seconds = int(api_cfg.get("wait_seconds") or 120)
+    poll_seconds = max(2, int(api_cfg.get("poll_seconds") or 5))
+    search = str(api_cfg.get("search") or "VFS").strip()
+    from_contains = str(api_cfg.get("from_contains") or "vfsglobal").lower().strip()
+    lookback_seconds = int(api_cfg.get("lookback_seconds") or 90)
+    started_at = int(time.time()) - lookback_seconds
+    deadline = time.time() + wait_seconds
+
+    while time.time() < deadline:
+        try:
+            letters = _notletters_fetch_letters(
+                base_url,
+                api_key,
+                mailbox,
+                password,
+                search=search,
+            )
+            code = _extract_code_from_letters(
+                letters,
+                min_date=started_at,
+                from_contains=from_contains,
+            )
+            if code:
+                return code
+        except Exception as e:
+            log.debug("NotLetters poll error for %s: %s", _mask_email(mailbox), e)
+        log.info("Waiting for NotLetters OTP email... (%.0fs left)", deadline - time.time())
+        time.sleep(poll_seconds)
+    return None
+
+
+def _get_link_via_notletters(
+    api_cfg: dict[str, Any],
+    *,
+    href_contains: str,
+    search: str,
+    from_contains: str,
+) -> str | None:
+    api_key = str(api_cfg.get("api_key") or "").strip()
+    mailbox = str(api_cfg.get("email") or "").strip()
+    password = str(api_cfg.get("password") or "").strip()
+    if not api_key or not mailbox or not password:
+        log.warning("NotLetters email-link retrieval is not fully configured.")
+        return None
+
+    base_url = str(api_cfg.get("base_url") or "https://api.notletters.com").rstrip("/")
+    wait_seconds = int(api_cfg.get("wait_seconds") or 120)
+    poll_seconds = max(2, int(api_cfg.get("poll_seconds") or 5))
+    lookback_seconds = int(api_cfg.get("lookback_seconds") or 90)
+    started_at = int(time.time()) - lookback_seconds
+    deadline = time.time() + wait_seconds
+
+    while time.time() < deadline:
+        try:
+            letters = _notletters_fetch_letters(
+                base_url,
+                api_key,
+                mailbox,
+                password,
+                search=search,
+            )
+            link = _extract_link_from_letters(
+                letters,
+                min_date=started_at,
+                from_contains=from_contains,
+                href_contains=href_contains,
+            )
+            if link:
+                return link
+        except Exception as e:
+            log.debug("NotLetters link poll error for %s: %s", _mask_email(mailbox), e)
+        log.info("Waiting for NotLetters email link... (%.0fs left)", deadline - time.time())
+        time.sleep(poll_seconds)
+    return None
+
+
+def _notletters_fetch_letters(
+    base_url: str,
+    api_key: str,
+    mailbox: str,
+    password: str,
+    *,
+    search: str = "",
+) -> list[dict[str, Any]]:
+    payload: dict[str, Any] = {
+        "email": mailbox,
+        "password": password,
+    }
+    filters: dict[str, Any] = {}
+    if search:
+        filters["search"] = search
+    if filters:
+        payload["filters"] = filters
+    response = requests.post(
+        f"{base_url}/v1/letters",
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        timeout=25,
+    )
+    response.raise_for_status()
+    data = response.json()
+    letters = (data.get("data") or {}).get("letters") or []
+    if not isinstance(letters, list):
+        return []
+    return [letter for letter in letters if isinstance(letter, dict)]
+
+
+def _extract_code_from_letters(
+    letters: list[dict[str, Any]],
+    *,
+    min_date: int,
+    from_contains: str = "",
+) -> str | None:
+    def letter_date(letter: dict[str, Any]) -> int:
+        try:
+            return int(letter.get("date") or 0)
+        except Exception:
+            return 0
+
+    for letter in sorted(letters, key=letter_date, reverse=True):
+        if letter_date(letter) and letter_date(letter) < min_date:
+            continue
+        sender = f"{letter.get('sender', '')} {letter.get('sender_name', '')}".lower()
+        subject = _decode(letter.get("subject", ""))
+        body = _letter_body(letter)
+        haystack = "\n".join((sender, subject.lower(), body.lower()))
+        if from_contains and from_contains not in haystack:
+            continue
+        match = _CODE_RE.search(subject) or _CODE_RE.search(body)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _extract_link_from_letters(
+    letters: list[dict[str, Any]],
+    *,
+    min_date: int,
+    from_contains: str = "",
+    href_contains: str = "",
+) -> str | None:
+    needle = href_contains.lower().strip()
+
+    def letter_date(letter: dict[str, Any]) -> int:
+        try:
+            return int(letter.get("date") or 0)
+        except Exception:
+            return 0
+
+    for letter in sorted(letters, key=letter_date, reverse=True):
+        if letter_date(letter) and letter_date(letter) < min_date:
+            continue
+        sender = f"{letter.get('sender', '')} {letter.get('sender_name', '')}".lower()
+        subject = _decode(letter.get("subject", ""))
+        body = _letter_body(letter)
+        haystack = "\n".join((sender, subject.lower(), body.lower()))
+        if from_contains and from_contains.lower() not in haystack:
+            continue
+        for link in _LINK_RE.findall(html.unescape(body)):
+            clean = link.rstrip(").,;]")
+            if not needle or needle in clean.lower():
+                return clean
+    return None
+
+
+def _letter_body(letter: dict[str, Any]) -> str:
+    raw = letter.get("letter") or {}
+    if isinstance(raw, dict):
+        return "\n".join(str(raw.get(key) or "") for key in ("text", "html"))
+    return str(raw or "")
+
+
 def _mask(code: str) -> str:
     if len(code) <= 2:
         return "*" * len(code)
     return code[0] + "*" * (len(code) - 2) + code[-1]
+
+
+def _mask_email(value: str) -> str:
+    if "@" not in value:
+        return "<mailbox>"
+    name, domain = value.split("@", 1)
+    return f"{name[:2]}***@{domain}"
 
 
 def fill_otp_into_page(sb, code: str, input_selectors, submit_selectors) -> bool:

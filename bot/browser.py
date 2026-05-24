@@ -1,8 +1,9 @@
 """Create and configure the SeleniumBase UC-mode browser.
 
 UC mode = SeleniumBase's "undetected Chrome" driver. It's what gives us a
-fighting chance against Cloudflare Turnstile on the VFS login page
-(`sb.uc_gui_click_captcha()` / `sb.uc_open_with_reconnect()`).
+fighting chance against Cloudflare Turnstile on the VFS login page. The bot
+does not use SeleniumBase GUI captcha click helpers because they move the real
+Windows mouse.
 
 We use the SB() context-manager form so the bot is a plain script (no pytest).
 """
@@ -14,6 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from .proxy_bridge import auth_bridge_supported, start_proxy_auth_bridge
 from .util import log
 
 
@@ -164,7 +166,18 @@ def open_browser(cfg) -> Iterator[object]:
     _patch_tempfile_permissions()
     from seleniumbase import SB
 
-    proxy = _proxy_for_sb(cfg.proxy)
+    upstream_proxy = _proxy_for_sb(cfg.proxy)
+    proxy = upstream_proxy
+    bridge = None
+    if (
+        upstream_proxy
+        and getattr(cfg, "proxy_auth_bridge_enabled", True)
+        and auth_bridge_supported(upstream_proxy)
+    ):
+        bridge = start_proxy_auth_bridge(upstream_proxy)
+        if bridge:
+            bridge.__enter__()
+            proxy = bridge.proxy
     kwargs = dict(
         uc=True,                       # undetected Chrome
         headless=cfg.headless,
@@ -185,7 +198,10 @@ def open_browser(cfg) -> Iterator[object]:
         log.info("Chrome remote debugging enabled on localhost:%s", remote_debug_port)
     if proxy:
         kwargs["proxy"] = proxy
-        log.info("Using proxy %s", _redact(proxy))
+        if bridge:
+            log.info("Using proxy %s via local auth bridge %s", _redact(upstream_proxy), proxy)
+        else:
+            log.info("Using proxy %s", _redact(proxy))
     else:
         log.warning("No proxy configured — expect possible Cloudflare 403 on hosting IPs.")
     if cfg.chrome_version:
@@ -197,13 +213,25 @@ def open_browser(cfg) -> Iterator[object]:
         kwargs["chromium_arg"] = chromium_args
 
     log.info("Launching browser (UC mode, headless=%s)…", cfg.headless)
-    with SB(**kwargs) as sb:
-        # A sane default wait so first_present/visible aren't fighting SB's own.
-        try:
-            sb.set_default_timeout(8)
-        except Exception:
-            pass
-        yield sb
+    try:
+        with SB(**kwargs) as sb:
+            # A sane default wait so first_present/visible aren't fighting SB's own.
+            try:
+                sb.set_default_timeout(8)
+            except Exception:
+                pass
+            try:
+                sb.driver.set_page_load_timeout(int(getattr(cfg, "page_load_timeout", 35)))
+            except Exception as e:
+                log.debug("Could not set page load timeout: %s", e)
+            try:
+                sb.driver.set_script_timeout(15)
+            except Exception as e:
+                log.debug("Could not set script timeout: %s", e)
+            yield sb
+    finally:
+        if bridge:
+            bridge.__exit__(None, None, None)
 
 
 def _redact(proxy: str) -> str:

@@ -5,6 +5,7 @@ import re
 
 import requests
 
+from .proxy_bridge import auth_bridge_supported, start_proxy_auth_bridge
 from .util import log
 
 
@@ -56,10 +57,26 @@ def precheck_proxy(cfg) -> None:
     url = getattr(cfg, "proxy_check_url", "") or "https://api.ipify.org?format=json"
     timeout = getattr(cfg, "proxy_check_timeout", 20)
     proxied = _proxy_url(proxy)
-    proxies = {"http": proxied, "https": proxied}
-    log.info("Checking proxy %s via %s", _redact_proxy(proxied), url)
+    use_bridge = (
+        getattr(cfg, "proxy_auth_bridge_enabled", True)
+        and auth_bridge_supported(proxied)
+    )
+    log.info(
+        "Checking proxy %s via %s%s",
+        _redact_proxy(proxied),
+        url,
+        " (local auth bridge)" if use_bridge else "",
+    )
     try:
-        resp = requests.get(url, proxies=proxies, timeout=timeout)
+        if use_bridge:
+            bridge = start_proxy_auth_bridge(proxied)
+            if bridge is None:
+                raise ProxyDead("PROXY_DEAD: proxy auth bridge could not start")
+            with bridge:
+                local = f"http://{bridge.proxy}"
+                resp = requests.get(url, proxies={"http": local, "https": local}, timeout=timeout)
+        else:
+            resp = requests.get(url, proxies={"http": proxied, "https": proxied}, timeout=timeout)
     except requests.RequestException as e:
         raise ProxyDead(f"PROXY_DEAD: {e}") from e
 

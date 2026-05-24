@@ -17,6 +17,8 @@ portal:
 
 # --- VFS account credentials ------------------------------------------------
 account:
+  # If account_pool.enabled=true and account_pool.vfs_password is set, these
+  # fixed credentials are only fallback values.
   email: "you@example.com"
   password: "your-vfs-password"
 
@@ -25,9 +27,10 @@ account:
 # confirming the booking.
 #   mode: "manual" -> the bot prints ">>> ENTER OTP:" and waits for you to
 #                     type it in the terminal.
-#   mode: "imap"   -> the bot reads the code automatically from a mailbox.
+#   mode: "imap"       -> the bot reads the code automatically from a mailbox.
+#   mode: "notletters" -> the bot reads the code through NotLetters API.
 otp:
-  mode: "manual"          # "manual" or "imap"
+  mode: "manual"          # "manual" | "imap" | "notletters"
   imap:
     host: "imap.gmail.com"
     port: 993
@@ -39,6 +42,55 @@ otp:
     from_contains: "vfsglobal"
     # How long to keep polling the mailbox for a fresh code (seconds).
     wait_seconds: 120
+  notletters:
+    api_key: "env:NOTLETTERS_API_KEY"
+    base_url: "https://api.notletters.com"
+    # email/password are filled automatically from account_pool when enabled.
+    email: ""
+    password: ""
+    search: "VFS"
+    from_contains: "vfsglobal"
+    wait_seconds: 120
+    poll_seconds: 5
+
+# --- Optional VFS account pool ----------------------------------------------
+# Reads mailbox credentials from `accounts_file` (`email:mailbox_password` per
+# line), uses `vfs_password` as the VFS login password, stores separate session
+# cookies per account, and rotates accounts on login restrictions/timeouts.
+account_pool:
+  enabled: false
+  accounts_file: "needed/emails.txt"
+  state_file: "saved_cookies/account_pool_state.json"
+  vfs_password: ""          # leave empty to use account.password for every pooled account
+  per_account_cookies: true
+  max_failures_per_account: 1
+  cooldown_minutes: 60
+  restricted_cooldown_minutes: 1440
+
+# --- Optional VFS account auto-registration --------------------------------
+# Uses account_pool mailboxes, fills the VFS registration form, reads OTP /
+# activation email through NotLetters, and marks accounts as registered in the
+# pool state. Use a VFS password that matches the portal password policy.
+registration:
+  enabled: false
+  auto_register: false       # true = register fresh pool accounts before login
+  max_per_run: 1             # safety limit for automatic registration on normal runs
+  activate_via_email: true
+  activation_email_search: "VFS"
+  activation_link_contains: "activateemail"
+  activation_wait_seconds: 120
+  # Optional defaults for portals that ask for personal data during account
+  # registration. Empty values fall back to the first applicants[] record.
+  defaults:
+    first_name: ""
+    last_name: ""
+    date_of_birth: ""
+    passport_number: ""
+    nationality: ""
+  random_phone:
+    country_code: "+7"
+    digits: 10
+    prefixes: ["900", "901", "902", "903", "904", "905", "906", "909"]
 
 # --- What appointment you want ---------------------------------------------
 # These strings must match EXACTLY what appears in the dropdowns on the site
@@ -98,7 +150,7 @@ network:
   # Format: "user:pass@host:port"  or  "host:port"  (leave empty for none).
   proxy: ""                 # or "env:VFS_PROXY"; default env fallback is VFS_PROXY
   # Run the browser without a visible window. Set false the first few runs so
-  # you can watch what happens and solve a captcha by hand if needed.
+  # you can watch diagnostics; captcha solving still stays automated.
   headless: false
   # Pin a specific Chrome major version if SeleniumBase picks a wrong one.
   chrome_version: ""        # e.g. "126" — leave empty for auto
@@ -113,8 +165,14 @@ network:
   remote_debug_port: ""
   # Fail fast if the configured proxy cannot reach a simple IP-check endpoint.
   proxy_precheck: true
+  # Authenticated proxies can fail in Chrome with HTTP 407. Keep this enabled
+  # so the browser uses a local no-auth bridge while the bot authenticates to
+  # the upstream proxy itself.
+  proxy_auth_bridge: true
   proxy_check_url: "https://api.ipify.org?format=json"
   proxy_check_timeout_seconds: 20
+  # Prevent Selenium from hanging forever when VFS returns a half-loaded page.
+  page_load_timeout_seconds: 35
 
 # --- Session reuse ----------------------------------------------------------
 # Optional: reuse a manually logged-in browser state instead of passing the
@@ -124,16 +182,15 @@ session:
   cookies_file: ""          # e.g. "saved_cookies/vfs_svn.json" or "env:VFS_SESSION_COOKIES"
   import_cookies: true      # try this file before normal login
   export_cookies: true      # refresh this file after a successful login/session
-  manual_login: false       # true = wait for you to log in before monitoring/booking
+  manual_login: false       # false = auto-enter account.email/password; true = wait for manual login
   manual_login_wait_seconds: 300
 
 # --- Captcha solver (Cloudflare Turnstile) ----------------------------------
-# SeleniumBase UC mode tries to click the Turnstile checkbox automatically,
-# but it doesn't always work — especially in headless mode or after a few
-# rate-limited tries. Configure a paid solver here as a fallback.
+# The bot never uses GUI captcha click helpers because they move the real
+# Windows mouse. Configure a paid solver here for Turnstile.
 #
 # Supported providers:
-#   "none"      — disabled (only the built-in UC click is used).
+#   "none"      - disabled (fail if Turnstile does not clear automatically).
 #   "capsolver" — https://capsolver.com (recommended; ~$0.8 / 1000 Turnstile).
 #   "twocaptcha"— https://2captcha.com  (TODO: not implemented yet).
 captcha:

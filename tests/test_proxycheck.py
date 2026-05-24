@@ -12,6 +12,7 @@ def cfg(**overrides):
     defaults = {
         "proxy": "user:pass@proxy.example:1000",
         "proxy_precheck_enabled": True,
+        "proxy_auth_bridge_enabled": False,
         "proxy_check_url": "https://api.ipify.org?format=json",
         "proxy_check_timeout": 20,
         "debugger_address": "",
@@ -51,6 +52,25 @@ def test_precheck_proxy_success_adds_http_scheme():
         "https": "http://user:pass@proxy.example:1000",
     }
     assert get.call_args.kwargs["timeout"] == 20
+
+
+def test_precheck_proxy_can_use_auth_bridge():
+    bridge = mock.Mock()
+    bridge.proxy = "127.0.0.1:12345"
+    bridge.__enter__ = mock.Mock(return_value=bridge)
+    bridge.__exit__ = mock.Mock(return_value=None)
+
+    with (
+        mock.patch("bot.proxycheck.auth_bridge_supported", return_value=True),
+        mock.patch("bot.proxycheck.start_proxy_auth_bridge", return_value=bridge),
+        mock.patch("bot.proxycheck.requests.get", return_value=response(payload={"ip": "198.16.1.2"})) as get,
+    ):
+        precheck_proxy(cfg(proxy_auth_bridge_enabled=True))
+
+    assert get.call_args.kwargs["proxies"] == {
+        "http": "http://127.0.0.1:12345",
+        "https": "http://127.0.0.1:12345",
+    }
 
 
 def test_precheck_proxy_raises_on_http_error():

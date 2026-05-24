@@ -188,6 +188,12 @@ def test_config_captcha_proxy_can_reference_env():
         assert cfg.captcha_proxy == "user2:pass2@host2:9001"
 
 
+def test_config_notletters_key_can_reference_env():
+    cfg = Config(raw={"otp": {"notletters": {"api_key": "env:NOTLETTERS_TOKEN"}}})
+    with mock.patch.dict("os.environ", {"NOTLETTERS_TOKEN": "NL-KEY"}):
+        assert cfg.notletters_cfg["api_key"] == "NL-KEY"
+
+
 # --- runner ----------------------------------------------------------------
 def main():
     tests = [v for k, v in globals().items() if k.startswith("test_")]

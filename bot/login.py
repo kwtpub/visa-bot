@@ -18,7 +18,7 @@ from .captcha import (
     inject_turnstile_token,
     page_url as _page_url,
 )
-from .otp import fill_otp_into_page, get_otp
+from .otp import OTPError, fill_otp_into_page, get_otp
 from .session import load_browser_state, save_browser_state
 from .util import (
     by_of,
@@ -210,20 +210,6 @@ def looks_logged_in(sb) -> bool:
     return False
 
 
-# --- the flow --------------------------------------------------------------
-def _try_uc_click(sb) -> None:
-    """Try every UC-mode captcha helper SeleniumBase exposes, swallowing errors."""
-    for fn_name in ("uc_gui_click_captcha", "uc_gui_handle_captcha", "uc_gui_click_cf"):
-        fn = getattr(sb, fn_name, None)
-        if fn is None:
-            continue
-        try:
-            fn()
-            return
-        except Exception as e:
-            log.debug("%s failed: %s", fn_name, e)
-
-
 def _turnstile_present(sb, timeout: float = 3.0) -> bool:
     """Detect Turnstile even when Cloudflare renders it in a closed shadow root."""
     deadline = time.time() + timeout
@@ -240,6 +226,97 @@ def _turnstile_present(sb, timeout: float = 3.0) -> bool:
             return True
         time.sleep(0.25)
     return False
+
+
+def _wait_for_turnstile_auto_clear(sb, timeout: float = 6.0) -> bool:
+    """Wait briefly for Cloudflare to clear Turnstile without GUI interaction."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not _turnstile_present(sb, timeout=0.5):
+            return True
+        time.sleep(0.5)
+    return not _turnstile_present(sb, timeout=0.5)
+
+
+def _cdp_runtime_value(sb, expression: str):
+    driver = getattr(sb, "driver", None)
+    if not driver or not hasattr(driver, "execute_cdp_cmd"):
+        return None
+    try:
+        result = driver.execute_cdp_cmd(
+            "Runtime.evaluate",
+            {
+                "expression": expression,
+                "returnByValue": True,
+                "awaitPromise": True,
+            },
+        )
+    except Exception as e:
+        log.debug("CDP Runtime.evaluate failed: %s", e)
+        return None
+    return result.get("result", {}).get("result", {}).get("value")
+
+
+def _stop_page_loading(sb) -> None:
+    driver = getattr(sb, "driver", None)
+    if driver and hasattr(driver, "execute_cdp_cmd"):
+        try:
+            driver.execute_cdp_cmd("Page.stopLoading", {})
+            return
+        except Exception as e:
+            log.debug("CDP Page.stopLoading failed: %s", e)
+    try:
+        sb.execute_script("window.stop();")
+    except Exception:
+        pass
+
+
+def _navigate_without_wait(sb, url: str) -> bool:
+    driver = getattr(sb, "driver", None)
+    if driver and hasattr(driver, "execute_cdp_cmd"):
+        try:
+            driver.execute_cdp_cmd("Page.navigate", {"url": url})
+            return True
+        except Exception as e:
+            log.debug("CDP Page.navigate failed: %s", e)
+    try:
+        sb.open(url)
+        return True
+    except Exception as e:
+        log.debug("sb.open failed: %s", e)
+        return False
+
+
+def _angular_shell_empty(sb) -> bool:
+    state = _cdp_runtime_value(
+        sb,
+        """
+        (() => {
+          const bodyText = (document.body && document.body.innerText || '').trim();
+          const appRoot = document.querySelector('app-root');
+          return {
+            readyState: document.readyState,
+            bodyTextLen: bodyText.length,
+            appRoot: !!appRoot,
+            appTextLen: appRoot ? (appRoot.innerText || '').trim().length : 0,
+            hasLogin: !!document.querySelector(
+              'input[formcontrolname="username"], input[type="email"], input[name="username"]'
+            ),
+            hasTurnstile: !!document.querySelector(
+              'iframe[src*="challenges.cloudflare.com"], input[name="cf-turnstile-response"]'
+            )
+          };
+        })()
+        """,
+    )
+    if not isinstance(state, dict):
+        return False
+    return (
+        bool(state.get("appRoot"))
+        and not state.get("hasLogin")
+        and not state.get("hasTurnstile")
+        and int(state.get("appTextLen") or 0) == 0
+    )
 
 
 def _page_looks_blank_or_error(sb) -> bool:
@@ -272,10 +349,17 @@ def _page_looks_blank_or_error(sb) -> bool:
             return True
 
     compact = "".join(src.split())
-    return len(src) < 200 and compact in {
+    if len(src) < 200 and compact in {
         "<html><head></head><body></body></html>",
         "<html><head></head><body></body></html>",
-    }
+    }:
+        return True
+
+    if "vfsglobal.com" in url and _angular_shell_empty(sb):
+        log.warning("VFS returned an empty Angular shell; page assets did not finish loading.")
+        return True
+
+    return False
 
 
 def _open_login_page(sb, cfg, reconnect_seconds: int = 5) -> None:
@@ -285,20 +369,23 @@ def _open_login_page(sb, cfg, reconnect_seconds: int = 5) -> None:
     3 total attempts to handle proxy connection resets.
     """
     max_retries = 3
+    last_error: Exception | None = None
     for attempt in range(1, max_retries + 1):
         # Try UC reconnect first (best for Cloudflare bypass)
         try:
             sb.uc_open_with_reconnect(cfg.login_url, reconnect_seconds)
         except Exception as e:
+            last_error = e
             log.debug("uc_open_with_reconnect failed (attempt %d): %s", attempt, e)
-            try:
-                sb.open(cfg.login_url)
-            except Exception as e2:
-                log.debug("normal open also failed (attempt %d): %s", attempt, e2)
+            if not _navigate_without_wait(sb, cfg.login_url):
+                log.debug("fallback navigation also failed (attempt %d).", attempt)
                 if attempt < max_retries:
+                    _stop_page_loading(sb)
                     human_pause(2.0, 4.0)
                     continue
-                return
+                raise LoginError(
+                    f"Could not open VFS login page after {max_retries} attempts: {e}"
+                ) from e
 
         human_pause(1.5, 3.0)
 
@@ -308,19 +395,22 @@ def _open_login_page(sb, cfg, reconnect_seconds: int = 5) -> None:
                 attempt, max_retries
             )
             # Try a simple open as fallback
-            try:
-                sb.open(cfg.login_url)
-                human_pause(2.0, 4.0)
-            except Exception as e:
-                log.debug("fallback open failed: %s", e)
+            _stop_page_loading(sb)
+            if not _navigate_without_wait(sb, cfg.login_url):
+                last_error = RuntimeError("fallback navigation failed")
+                log.debug("fallback navigation failed")
+            human_pause(2.0, 4.0)
 
             if _page_looks_blank_or_error(sb):
                 if attempt < max_retries:
+                    _stop_page_loading(sb)
                     human_pause(3.0, 6.0)
                     continue
-                log.error("Page still blank/error after %d attempts.", max_retries)
+                raise LoginError(
+                    f"VFS login page stayed blank/error after {max_retries} attempts."
+                ) from last_error
             else:
-                log.info("Page loaded successfully via fallback open.")
+                log.info("Page loaded successfully via fallback navigation.")
                 return
         else:
             log.debug("Page loaded successfully (attempt %d).", attempt)
@@ -366,61 +456,42 @@ def _solve_with_paid_service(sb, cfg) -> bool:
 
 
 def _pass_turnstile(sb, cfg) -> None:
-    """Best-effort Cloudflare Turnstile solve.
+    """Solve Cloudflare Turnstile without moving the real OS mouse.
 
     Order of attempts:
-      1) SeleniumBase UC-mode auto-click (free, sometimes flaky).
-      2) Paid solver (CapSolver) if configured — extract sitekey, get token,
-         inject into the page.
-      3) Manual fallback when running with --show: give the human ~90s to click.
+      1) Wait briefly for Cloudflare to auto-clear the challenge.
+      2) Use the configured paid solver, currently CapSolver, and inject the token.
+
+    SeleniumBase GUI captcha helpers are intentionally not used because they
+    move the real Windows mouse and slow down the bot.
     """
     install_turnstile_hook(sb)
-    # Nothing on page at all -> done.
     if not _turnstile_present(sb, timeout=3):
         return
 
-    log.info("Cloudflare Turnstile present — attempting UC click…")
-    for attempt in range(2):
-        _try_uc_click(sb)
-        human_pause(1.5, 3.0)
-        if not _turnstile_present(sb, timeout=2):
-            log.info("Turnstile cleared by UC-mode.")
-            return
-        # try a reconnect-open which often clears CF state
-        try:
-            _open_login_page(sb, cfg, reconnect_seconds=4)
-        except Exception:
-            pass
-        human_pause(2, 4)
-        if not _turnstile_present(sb, timeout=2):
-            log.info("Turnstile cleared after reconnect.")
-            return
+    log.info("Cloudflare Turnstile present; waiting for automatic clearance without GUI click.")
+    if _wait_for_turnstile_auto_clear(sb, timeout=6):
+        log.info("Turnstile cleared automatically.")
+        return
 
-    # UC didn't manage it -> try the paid service.
-    if cfg.captcha_enabled:
-        log.info("Falling back to paid captcha service: %s", cfg.captcha_provider)
-        if _solve_with_paid_service(sb, cfg):
-            # Give the page a moment to validate the token
-            for _ in range(6):
-                if not _turnstile_present(sb, timeout=1):
-                    log.info("Turnstile cleared by paid solver.")
-                    return
-                time.sleep(1)
-            log.warning("Paid solver returned a token but Turnstile widget is still present. "
-                        "The form may still accept it on submit — continuing.")
-            return
-        # solver returned False -> fall through to manual
+    if not cfg.captcha_enabled:
+        screenshot(sb, cfg.screenshot_dir, "turnstile_solver_not_configured", cfg.screenshots_enabled)
+        raise LoginError(
+            "Turnstile did not clear automatically, and no captcha solver is configured. "
+            "GUI captcha clicking is disabled; configure captcha.provider='capsolver' and api_key."
+        )
 
-    # Last resort: manual.
-    if _turnstile_present(sb, timeout=2):
-        log.warning("Turnstile still showing. If running with --show, solve it manually now…")
-        if not cfg.headless:
-            for _ in range(18):
-                time.sleep(5)
-                if not _turnstile_present(sb, timeout=1):
-                    log.info("Turnstile cleared (manually).")
-                    return
+    log.info("Turnstile did not clear automatically; using captcha service: %s", cfg.captcha_provider)
+    if not _solve_with_paid_service(sb, cfg):
+        screenshot(sb, cfg.screenshot_dir, "turnstile_solver_failed", cfg.screenshots_enabled)
+        raise LoginError("Captcha solver could not solve or inject the Turnstile token.")
 
+    # The iframe can remain in the DOM after a valid token is injected, so form
+    # validation later decides whether the page accepted it.
+    if _wait_for_turnstile_auto_clear(sb, timeout=10):
+        log.info("Turnstile cleared by captcha solver.")
+    else:
+        log.warning("Captcha token injected, but Turnstile widget is still present; continuing to form validation.")
 
 
 def _dismiss_cookie_banner(sb) -> None:
@@ -449,7 +520,7 @@ def _dismiss_cookie_banner(sb) -> None:
     human_pause(0.5, 1.0)
 
 
-def _wait_for_submit_enabled(sb, submit_sel: str, timeout: int = 15) -> None:
+def _wait_for_submit_enabled(sb, submit_sel: str, timeout: int = 15) -> bool:
     """Wait until the submit button loses its disabled attribute.
 
     On the Russian portal the Sign-In button stays disabled until the
@@ -462,14 +533,38 @@ def _wait_for_submit_enabled(sb, submit_sel: str, timeout: int = 15) -> None:
         try:
             disabled = sb.get_attribute(submit_sel, "disabled", by=by)
             if disabled is None or disabled == "false":
-                return  # button is enabled
+                return True  # button is enabled
         except Exception:
-            return  # element gone / selector stale
+            return False  # element gone / selector stale
         time.sleep(0.5)
     log.warning(
-        "Submit button still disabled after %ds - clicking anyway (Turnstile "
-        "may not have completed).", timeout
+        "Submit button still disabled after %ds; Turnstile may not have completed.",
+        timeout,
     )
+    return False
+
+
+def _click_login_submit(sb, timeout: int = 15) -> None:
+    deadline = time.time() + timeout
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        submit_sel = first_visible(sb, S.LOGIN_SUBMIT, timeout=3)
+        if not submit_sel:
+            human_pause(0.3, 0.7)
+            continue
+        if not _wait_for_submit_enabled(sb, submit_sel, timeout=15):
+            human_pause(0.5, 1.0)
+            continue
+        try:
+            sb.click(submit_sel, by=by_of(submit_sel))
+            return
+        except Exception as e:
+            last_error = e
+            log.debug("Login submit click failed, retrying: %s", e)
+            human_pause(0.4, 0.9)
+    if last_error:
+        raise LoginError(f"Could not click the Sign In button: {last_error}") from last_error
+    raise LoginError("Could not find the Sign In button - update selectors.")
 
 
 def perform_login(sb, cfg) -> None:
@@ -555,13 +650,7 @@ def perform_login(sb, cfg) -> None:
     sb.type(pwd_sel, cfg.password, by=by_of(pwd_sel))
     human_pause()
 
-    submit_sel = first_visible(sb, S.LOGIN_SUBMIT, timeout=8)
-    if not submit_sel:
-        raise LoginError("Could not find the Sign In button — update selectors.")
-    # On some portals (especially Russian), the submit button is disabled until
-    # the Turnstile captcha is verified. Wait for it to become enabled.
-    _wait_for_submit_enabled(sb, submit_sel, timeout=15)
-    sb.click(submit_sel, by=by_of(submit_sel))
+    _click_login_submit(sb, timeout=45)
     log.info("Submitted login form.")
     human_pause(3, 6)
 
@@ -587,7 +676,10 @@ def perform_login(sb, cfg) -> None:
     if otp_sel:
         log.info("Login OTP requested.")
         # let the operator / IMAP fetch it
-        code = get_otp(cfg, prompt="Enter the LOGIN OTP VFS just emailed you")
+        try:
+            code = get_otp(cfg, prompt="Enter the LOGIN OTP VFS just emailed you")
+        except OTPError as e:
+            raise LoginError(str(e)) from e
         ok = fill_otp_into_page(sb, code, S.OTP_INPUT, S.OTP_SUBMIT)
         if not ok:
             raise LoginError("Couldn't enter the OTP into the page — update OTP selectors.")
@@ -617,6 +709,11 @@ def perform_login(sb, cfg) -> None:
                 break
     if not looks_logged_in(sb):
         screenshot(sb, cfg.screenshot_dir, "post_login_unknown", cfg.screenshots_enabled)
+        if _is_login_url(_page_url(sb)) or first_visible(sb, S.LOGIN_EMAIL, timeout=1):
+            raise LoginError(
+                "Login submit left the browser on the login page. "
+                "Turnstile or credentials were not accepted."
+            )
         log.warning(
             "Logged in but didn't find the expected dashboard control. "
             "Will still try to proceed — check screenshots if monitoring fails."
@@ -626,6 +723,21 @@ def perform_login(sb, cfg) -> None:
 
     if state_file and cfg.session_export_enabled:
         save_browser_state(sb, cfg, state_file)
+
+
+def auto_login(sb, cfg) -> None:
+    """Force credential-based login even when the config is set to manual login."""
+    session_cfg = cfg.raw.setdefault("session", {})
+    had_manual_login = "manual_login" in session_cfg
+    previous_manual_login = session_cfg.get("manual_login")
+    session_cfg["manual_login"] = False
+    try:
+        perform_login(sb, cfg)
+    finally:
+        if had_manual_login:
+            session_cfg["manual_login"] = previous_manual_login
+        else:
+            session_cfg.pop("manual_login", None)
 
 
 def wait_for_manual_login(sb, cfg, *, state_file=None, timeout_seconds: int | None = None) -> None:

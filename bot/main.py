@@ -21,13 +21,27 @@ import sys
 import time
 from pathlib import Path
 
+from .accounts import load_account_pool
 from .booking import BookingError, attempt_booking
 from .browser import open_browser
 from .config import load_config
-from .login import EdgeBlocked, LoginError, RateLimited, looks_logged_in, perform_login
+from .login import (
+    EdgeBlocked,
+    LoginError,
+    RateLimited,
+    auto_login,
+    looks_logged_in,
+    perform_login,
+)
 from .monitor import MonitorError, check_availability, inspect_options
 from .notify import Notifier
 from .proxycheck import ProxyDead, precheck_proxy
+from .registration import (
+    RegistrationAlreadyExists,
+    RegistrationError,
+    check_registration_form_ready,
+    register_account,
+)
 from .util import log, screenshot, setup_logging, sleep_with_jitter
 
 
@@ -39,9 +53,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true", help="walk the booking flow but stop before final Confirm")
     p.add_argument("--once", action="store_true", help="run a single check and exit")
     p.add_argument("--inspect", action="store_true", help="log in and print the dropdown options, then exit")
+    p.add_argument("--register-accounts", type=int, default=0, metavar="N", help="register up to N fresh accounts from account_pool and exit")
+    p.add_argument("--check-registration-form", action="store_true", help="open VFS registration form and verify selectors without submitting")
     p.add_argument("--show", action="store_true", help="force a visible (non-headless) browser")
     p.add_argument("--cookies", type=Path, default=None, help="browser-state JSON to import/export for session reuse")
     p.add_argument("--save-cookies", type=Path, default=None, help="open VFS and wait for manual login, then save browser state")
+    login_group = p.add_mutually_exclusive_group()
+    login_group.add_argument("--auto-login", action="store_true", help="force account.email/password login")
+    login_group.add_argument("--manual-login", action="store_true", help="wait for manual login before monitoring/booking")
     return p.parse_args(argv)
 
 
@@ -53,6 +72,50 @@ def _effective_auto_book(cfg, args) -> bool:
     if args.book:
         return True
     return cfg.auto_book
+
+
+def _register_accounts_from_pool(cfg, account_pool, limit: int) -> int:
+    ready = 0
+    attempted = 0
+    while attempted < limit:
+        if not account_pool.select_for_registration():
+            log.info("No fresh account left to register.")
+            break
+        account_pool.apply_current()
+        attempted += 1
+        try:
+            with open_browser(cfg) as sb:
+                register_account(sb, cfg, account_pool.current)
+        except RegistrationAlreadyExists as e:
+            log.warning("Registration skipped: %s", e)
+            account_pool.mark_registered()
+            ready += 1
+        except RegistrationError as e:
+            log.error("Registration failed: %s", e)
+            account_pool.mark_registration_failure(str(e))
+        except Exception as e:  # pragma: no cover - live VFS/browser failures
+            log.exception("Unexpected registration error: %s", e)
+            account_pool.mark_registration_failure(str(e))
+        else:
+            account_pool.mark_registered()
+            ready += 1
+
+    log.info("Account registration finished: %d/%d account(s) ready.", ready, attempted)
+    return ready
+
+
+def _select_pool_account_for_login(cfg, account_pool) -> bool:
+    if not account_pool:
+        return True
+    registered_only = cfg.registration_auto_register
+    if not account_pool.select_next(registered_only=registered_only):
+        if registered_only:
+            log.error("No registered account available in account pool.")
+        else:
+            log.error("No available account in account pool.")
+        return False
+    account_pool.apply_current()
+    return True
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -67,19 +130,68 @@ def run(argv: list[str] | None = None) -> int:
         cfg.raw.setdefault("session", {})["cookies_file"] = str(state_file)
     if args.dry_run:
         cfg.raw.setdefault("behaviour", {})["auto_book_dry_run"] = True
+    if args.auto_login:
+        cfg.raw.setdefault("session", {})["manual_login"] = False
+    elif args.manual_login:
+        cfg.raw.setdefault("session", {})["manual_login"] = True
+
+    try:
+        account_pool = load_account_pool(cfg)
+    except Exception as e:
+        log.error("Account pool setup failed: %s", e)
+        return 1
 
     auto_book = _effective_auto_book(cfg, args)
     cfg.raw.setdefault("behaviour", {})["auto_book"] = auto_book
+    login = auto_login if args.auto_login else perform_login
     notifier = Notifier(cfg)
 
-    log.info("=== VFS bot ===  portal=%s  auto_book=%s  dry_run=%s  inspect=%s  once=%s",
-             cfg.login_url, auto_book, cfg.auto_book_dry_run, args.inspect, args.once)
+    log.info(
+        "=== VFS bot ===  portal=%s  auto_book=%s  dry_run=%s  manual_login=%s  inspect=%s  once=%s",
+        cfg.login_url,
+        auto_book,
+        cfg.auto_book_dry_run,
+        cfg.manual_login_enabled,
+        args.inspect,
+        args.once,
+    )
 
     try:
         precheck_proxy(cfg)
     except ProxyDead as e:
         log.error("%s", e)
         notifier.error("proxy precheck", e)
+        return 1
+
+    if args.check_registration_form:
+        try:
+            with open_browser(cfg) as sb:
+                state = check_registration_form_ready(sb, cfg)
+            log.info(
+                "Registration form check: ready=%s reason=%s url=%s",
+                state.get("ready"),
+                state.get("reason"),
+                state.get("url"),
+            )
+            if state.get("missing"):
+                log.error("Missing registration controls: %s", ", ".join(state["missing"]))
+            if state.get("screenshot"):
+                log.info("Registration check screenshot: %s", state["screenshot"])
+            return 0 if state.get("ready") else 1
+        except Exception as e:
+            log.exception("Registration form check failed: %s", e)
+            return 1
+
+    if args.register_accounts:
+        if not account_pool:
+            log.error("--register-accounts requires account_pool.enabled=true.")
+            return 1
+        return 0 if _register_accounts_from_pool(cfg, account_pool, args.register_accounts) else 1
+
+    if account_pool and cfg.registration_auto_register:
+        _register_accounts_from_pool(cfg, account_pool, cfg.registration_max_per_run)
+
+    if not _select_pool_account_for_login(cfg, account_pool):
         return 1
 
     if args.save_cookies:
@@ -102,7 +214,7 @@ def run(argv: list[str] | None = None) -> int:
     if args.inspect:
         try:
             with open_browser(cfg) as sb:
-                perform_login(sb, cfg)
+                login(sb, cfg)
                 inspect_options(sb, cfg)
             return 0
         except LoginError as e:
@@ -117,16 +229,37 @@ def run(argv: list[str] | None = None) -> int:
     consecutive_failures = 0
     check_no = 0
 
+    def rotate_account_after_error(
+        error: Exception,
+        *,
+        restricted: bool = False,
+        bad_credentials: bool = False,
+    ) -> bool:
+        if not account_pool:
+            return False
+        return account_pool.rotate_after_failure(
+            cfg,
+            str(error),
+            restricted=restricted,
+            bad_credentials=bad_credentials,
+            registered_only=cfg.registration_auto_register,
+        )
+
     # We keep one browser open and reuse it; reopen on hard failures.
     while True:
         try:
             with open_browser(cfg) as sb:
                 # log in once for this browser session
                 try:
-                    perform_login(sb, cfg)
+                    login(sb, cfg)
                 except RateLimited as e:
                     notifier.error("login (rate-limited)", e)
                     log.error("%s", e)
+                    if account_pool:
+                        if rotate_account_after_error(e, restricted=True):
+                            consecutive_failures = 0
+                            continue
+                        return 1
                     if args.once:
                         return 1
                     # long back-off before trying a whole new session
@@ -141,11 +274,21 @@ def run(argv: list[str] | None = None) -> int:
                 except LoginError as e:
                     notifier.error("login", e)
                     log.error("%s", e)
+                    text = str(e).lower()
+                    bad_credentials = "email/password" in text or "login rejected" in text
+                    if account_pool:
+                        if rotate_account_after_error(e, bad_credentials=bad_credentials):
+                            consecutive_failures = 0
+                            continue
+                        return 1
                     if args.once:
                         return 1
                     # could be transient (challenge) — retry after a normal wait
                     sleep_with_jitter(cfg.check_interval, cfg.jitter)
                     continue
+                else:
+                    if account_pool:
+                        account_pool.mark_success()
 
                 # --- check / book loop on this session ----------------------
                 while True:
@@ -162,9 +305,14 @@ def run(argv: list[str] | None = None) -> int:
                             break  # exits inner loop -> with-block closes -> new session
                         # otherwise try a quick re-login in the same browser
                         try:
-                            perform_login(sb, cfg)
+                            login(sb, cfg)
                         except LoginError as e:
                             log.warning("Quick re-login failed: %s", e)
+                            if account_pool:
+                                if rotate_account_after_error(e):
+                                    consecutive_failures = 0
+                                    break
+                                return 1
                             sleep_with_jitter(cfg.check_interval, cfg.jitter)
                             continue
 

@@ -26,3 +26,8 @@ logs/
 needed/
 .playwright-mcp/
 .codex_tmp/
+
+# Local handoff / external CLI artifacts
+handoff.md
+.antigravitycli/
+pytest-cache-files-*/

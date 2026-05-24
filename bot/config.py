@@ -98,6 +98,10 @@ class Config:
         return bool(self.raw.get("network", {}).get("proxy_precheck", True))
 
     @property
+    def proxy_auth_bridge_enabled(self) -> bool:
+        return bool(self.raw.get("network", {}).get("proxy_auth_bridge", True))
+
+    @property
     def proxy_check_url(self) -> str:
         return str(
             self.raw.get("network", {}).get("proxy_check_url")
@@ -107,6 +111,10 @@ class Config:
     @property
     def proxy_check_timeout(self) -> int:
         return int(self.raw.get("network", {}).get("proxy_check_timeout_seconds", 20))
+
+    @property
+    def page_load_timeout(self) -> int:
+        return int(self.raw.get("network", {}).get("page_load_timeout_seconds", 35))
 
     # --- session reuse -----------------------------------------------------
     @property
@@ -197,6 +205,37 @@ class Config:
         return self.raw.get("otp", {}).get("imap", {}) or {}
 
     @property
+    def notletters_cfg(self) -> dict[str, Any]:
+        cfg = dict(self.raw.get("otp", {}).get("notletters", {}) or {})
+        value = str(cfg.get("api_key") or "").strip()
+        if value.lower().startswith("env:"):
+            env_name = value.split(":", 1)[1].strip()
+            value = os.getenv(env_name, "").strip()
+        cfg["api_key"] = value or os.getenv("NOTLETTERS_API_KEY", "").strip()
+        return cfg
+
+    @property
+    def account_pool_enabled(self) -> bool:
+        return bool(self.raw.get("account_pool", {}).get("enabled", False))
+
+    @property
+    def registration_cfg(self) -> dict[str, Any]:
+        return self.raw.get("registration", {}) or {}
+
+    @property
+    def registration_enabled(self) -> bool:
+        reg = self.registration_cfg
+        return bool(reg.get("enabled", False) or reg.get("auto_register", False))
+
+    @property
+    def registration_auto_register(self) -> bool:
+        return bool(self.registration_cfg.get("auto_register", False))
+
+    @property
+    def registration_max_per_run(self) -> int:
+        return max(1, int(self.registration_cfg.get("max_per_run", 1)))
+
+    @property
     def telegram_token(self) -> str:
         return (self.raw.get("telegram", {}).get("bot_token") or "").strip()
 
@@ -251,10 +290,16 @@ def load_config(path: Path | None = None) -> Config:
             _fail(f"missing top-level section '{key}' in {path}")
 
     acc = raw["account"]
-    if not acc.get("email") or "@" not in str(acc.get("email", "")):
-        _fail("account.email looks invalid")
-    if not acc.get("password") or acc["password"] in {"", "your-vfs-password"}:
-        _fail("account.password is not set")
+    pool_enabled = bool(raw.get("account_pool", {}).get("enabled", False))
+    if not pool_enabled:
+        if not acc.get("email") or "@" not in str(acc.get("email", "")):
+            _fail("account.email looks invalid")
+        if not acc.get("password") or acc["password"] in {"", "your-vfs-password"}:
+            _fail("account.password is not set")
+    elif not raw.get("account_pool", {}).get("vfs_password") and (
+        not acc.get("password") or acc["password"] in {"", "your-vfs-password"}
+    ):
+        _fail("account_pool.vfs_password or account.password is required")
 
     if not raw["portal"].get("url_segment") and not raw["portal"].get("login_url"):
         _fail("portal.url_segment (e.g. 'rus/en/fra') or portal.login_url is required")

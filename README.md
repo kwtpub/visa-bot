@@ -19,9 +19,9 @@ VFS deliberately made automation hard because thousands of bots exist. Realistic
    From a home connection it *may* work; from a VPS it won't. Configure `network.proxy`.
 2. **Accounts get rate-limited and banned for hammering.** Keep `check_interval_seconds`
    at **10–20 minutes**. The bot adds random jitter on top. Don't get greedy.
-3. **OTP is a manual step unless you wire IMAP.** VFS emails a code at login (and sometimes
+3. **OTP is a manual step unless you wire IMAP/NotLetters.** VFS emails a code at login (and sometimes
    before confirming a booking). In `manual` mode the bot prints `>>> ENTER OTP:` and waits
-   for you to type it. In `imap` mode it reads it from your mailbox automatically.
+   for you to type it. In `imap` or `notletters` mode it reads it automatically.
 4. **The site changes.** Selectors (centre/category dropdowns, calendar, buttons) drift.
    When something breaks, run with `--inspect` to dump current options, and update
    `bot/selectors.py`.
@@ -76,6 +76,56 @@ python -m bot.main --once
 
 # Watch what it does (overrides headless)
 python -m bot.main --show
+
+# Force automatic credential login even if config has session.manual_login: true
+python -m bot.main --auto-login --show
+```
+
+By default the bot logs in automatically with `account.email` and
+`account.password`. Set `session.manual_login: true` only when you want the bot
+to pause and wait for a human login. For a fully unattended login, also set
+`otp.mode: "imap"` or `otp.mode: "notletters"` so the login OTP is read from
+email automatically.
+
+## Account Pool
+
+If you have pre-created VFS accounts and NotLetters mailboxes, enable the pool:
+
+```yaml
+otp:
+  mode: "notletters"
+  notletters:
+    api_key: "env:NOTLETTERS_API_KEY"
+
+account_pool:
+  enabled: true
+  accounts_file: "needed/emails.txt"
+  vfs_password: "shared-vfs-password"
+```
+
+`emails.txt` is `email:mailbox_password` per line. The bot stores per-account
+cookies under `saved_cookies/accounts/` and state in
+`saved_cookies/account_pool_state.json`; both folders are git-ignored. On login
+restriction/timeouts the current account is put into cooldown and the next
+available account is selected.
+
+## Check VFS Registration Form
+
+Use this smoke test after changing proxy or selectors. It opens VFS, clicks the
+create-account link, verifies that the registration controls are visible, saves a
+screenshot, and exits without filling or submitting the form:
+
+```powershell
+.\.venv\Scripts\python.exe -m bot.main --check-registration-form --show
+```
+
+Keep automatic registration disabled in normal config:
+
+```yaml
+registration:
+  enabled: true
+  auto_register: false
+  max_per_run: 1
 ```
 
 ## Reuse a logged-in session
@@ -110,9 +160,9 @@ already ignored by git.
 
 ## Cloudflare Turnstile (paid solver)
 
-The free `sb.uc_gui_click_captcha()` helper sometimes can't get past Turnstile
-on VFS — especially in headless mode or after a few retries. Configure a paid
-solver as a fallback:
+The bot does not use SeleniumBase GUI captcha click helpers because they move
+the real Windows mouse and slow down the run. Configure a paid solver for
+Turnstile:
 
 1. Sign up at https://capsolver.com and top up a few dollars (~$0.8 / 1000
    solves on Turnstile).
@@ -130,26 +180,27 @@ solver as a fallback:
    ```
 
 The bot will:
-1. First try the built-in UC click (free).
-2. If that doesn't clear the widget after 2 attempts, extract the Turnstile
-   `sitekey` from the page, send it to CapSolver, and inject the returned
-   token into the form.
-3. If everything fails and you're running with `--show`, fall back to
-   manual click.
+1. Wait briefly for Cloudflare to clear the widget automatically.
+2. If it does not clear, extract the Turnstile `sitekey` from the page, send it
+   to CapSolver, and inject the returned token into the form.
+3. If no solver is configured or the solver fails, stop with an error instead
+   of moving the OS mouse.
 
-Set `provider: "none"` to disable the paid path entirely.
+Set `provider: "none"` only if you want the bot to fail when Turnstile does not
+clear automatically.
 
 ## How it works
 
 ```
 main.py
-  └─ login.py     open login URL ─► pass Turnstile (uc_gui_click_captcha)
+  └─ login.py     open login URL ─► pass Turnstile (auto-clear or CapSolver)
   │                ─► type email/password ─► handle login OTP ─► session ready
   ├─ monitor.py   pick centre / category ─► open calendar ─► read free dates
   │                (handles the queue / "waiting room" page; retries politely)
   ├─ booking.py   pick date+time ─► fill applicant data ─► review
   │                ─► handle confirm OTP ─► confirm ─► screenshot the confirmation
-  ├─ otp.py       manual console input OR IMAP mailbox polling
+  ├─ otp.py       manual console input OR IMAP/NotLetters mailbox polling
+  ├─ accounts.py  account pool, per-account cookies, cooldown rotation
   └─ notify.py    Telegram messages (found / booked / error / OTP-needed / heartbeat)
 ```
 
@@ -164,7 +215,8 @@ State machine per cycle:
 | `bot/login.py` | login flow + Turnstile + login-OTP |
 | `bot/monitor.py` | navigate to calendar, parse availability, handle queue page |
 | `bot/booking.py` | the actual booking steps + confirm-OTP |
-| `bot/otp.py` | OTP retrieval (manual / IMAP) |
+| `bot/otp.py` | OTP retrieval (manual / IMAP / NotLetters) |
+| `bot/accounts.py` | account pool, per-account cookies, cooldown rotation |
 | `bot/notify.py` | Telegram notifier (no-op if not configured) |
 | `bot/selectors.py` | **all CSS/XPath selectors in one place** — edit here when the site changes |
 | `bot/config.py` | load + validate `config.yaml` |
@@ -174,8 +226,8 @@ State machine per cycle:
 
 - **`403` / blank page / "Access denied"** → your IP is blocked. Use a residential proxy in
   the applicant's country (`network.proxy`).
-- **Turnstile never passes** → run with `--show`, solve it by hand once; sometimes a fresh
-  proxy IP or `network.chrome_version` pin helps. Make sure `seleniumbase` is up to date.
+- **Turnstile never passes** -> check CapSolver balance/API key and try a fresh
+  proxy IP or `network.chrome_version` pin. The bot does not move the OS mouse.
 - **"Login failed" after a few runs** → you're rate-limited. Wait 1–2 hours, increase
   `check_interval_seconds`.
 - **Dropdown values "not found"** → run `--inspect`, copy the exact strings.

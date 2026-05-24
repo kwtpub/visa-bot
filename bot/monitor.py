@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import random
 import re
+import time
 from dataclasses import dataclass, field
 
 from . import selectors as S
 from .captcha import install_turnstile_hook, solve_cloudflare_clearance
 from .login import (
     _solve_with_paid_service,
-    _try_uc_click,
+    _wait_for_turnstile_auto_clear,
     _turnstile_present,
     is_queue_page,
     wait_out_queue,
@@ -47,6 +48,51 @@ class MonitorError(RuntimeError):
 
 
 # --- mat-select helpers ----------------------------------------------------
+def _select_enabled(sb, sel: str) -> bool:
+    try:
+        disabled = sb.get_attribute(sel, "disabled", by=by_of(sel))
+        aria_disabled = sb.get_attribute(sel, "aria-disabled", by=by_of(sel))
+        classes = sb.get_attribute(sel, "class", by=by_of(sel)) or ""
+    except Exception:
+        return True
+    return (
+        disabled in (None, "", "false")
+        and aria_disabled != "true"
+        and "disabled" not in classes.lower()
+    )
+
+
+def _wait_select_enabled(sb, sel: str, timeout: float = 20.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _select_enabled(sb, sel):
+            return True
+        human_pause(0.3, 0.6)
+    return False
+
+
+def _select_options_visible(sb) -> bool:
+    return bool(first_present(sb, S.MAT_OPTION_PANEL + S.MAT_OPTION_ANY, timeout=1))
+
+
+def _js_click_select(sb, sel: str) -> None:
+    script = r"""
+const sel = arguments[0];
+const isXpath = arguments[1];
+const el = isXpath
+  ? document.evaluate(sel, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue
+  : document.querySelector(sel);
+if (!el) return false;
+const target = el.querySelector('.mat-select-trigger,.mat-mdc-select-trigger,.mdc-select__anchor') || el;
+target.scrollIntoView({block: 'center', inline: 'center'});
+for (const type of ['mousedown', 'mouseup', 'click']) {
+  target.dispatchEvent(new MouseEvent(type, {bubbles: true, cancelable: true, view: window}));
+}
+return true;
+"""
+    sb.execute_script(script, sel, by_of(sel) == "xpath")
+
+
 def _open_select(sb, trigger_selectors, label: str):
     sel = first_visible(sb, trigger_selectors, timeout=8)
     if not sel:
@@ -54,12 +100,20 @@ def _open_select(sb, trigger_selectors, label: str):
             f"Couldn't find the '{label}' dropdown. Run `--inspect` and update "
             f"bot/selectors.py (SELECT_*_TRIGGER)."
         )
-    sb.click(sel, by=by_of(sel))
-    human_pause(0.5, 1.2)
-    # wait for the overlay panel
-    if not first_present(sb, S.MAT_OPTION_PANEL, timeout=4):
-        # some builds render options inline; not fatal
-        log.debug("No overlay panel detected after opening '%s' select.", label)
+    if not _wait_select_enabled(sb, sel, timeout=20):
+        raise MonitorError(f"The '{label}' dropdown stayed disabled.")
+    for attempt in range(3):
+        if attempt:
+            _close_overlay(sb)
+        sb.click(sel, by=by_of(sel))
+        human_pause(0.5, 1.2)
+        if _select_options_visible(sb):
+            return sel
+        _js_click_select(sb, sel)
+        human_pause(0.5, 1.2)
+        if _select_options_visible(sb):
+            return sel
+    raise MonitorError(f"Couldn't open the '{label}' dropdown.")
     return sel
 
 
@@ -72,18 +126,28 @@ def _pick_option(sb, value: str, label: str) -> None:
     xpaths = [
         f'//mat-option//span[normalize-space()="{value}"]',
         f'//mat-option[normalize-space()="{value}"]',
+        f'//*[contains(@class, "mat-mdc-option")]//*[normalize-space()="{value}"]',
         f'//*[@role="option"][normalize-space()="{value}"]',
         f'//mat-option//span[contains(normalize-space(), "{value}")]',
+        f'//*[contains(@class, "mat-mdc-option")]//*[contains(normalize-space(), "{value}")]',
         f'//*[@role="option"][contains(normalize-space(), "{value}")]',
     ]
-    for xp in xpaths:
-        if sb.is_element_present(xp, by="xpath"):
-            sb.click(xp, by="xpath")
-            human_pause(0.4, 1.0)
-            log.info("Selected %s: %s", label, value)
-            return
+    deadline = time.time() + 20
+    opts: list[str] = []
+    while time.time() < deadline:
+        for xp in xpaths:
+            if sb.is_element_present(xp, by="xpath"):
+                sb.click(xp, by="xpath")
+                human_pause(0.4, 1.0)
+                log.info("Selected %s: %s", label, value)
+                return
+        opts = _read_open_options(sb)
+        if opts:
+            break
+        human_pause(0.4, 0.8)
     # couldn't find it — dump what's available to help the user
-    opts = _read_open_options(sb)
+    if not opts:
+        opts = _read_open_options(sb)
     raise MonitorError(
         f"Option '{value}' not found in the '{label}' dropdown. Available options:\n"
         + "\n".join(f"  - {o}" for o in opts)
@@ -94,7 +158,7 @@ def _pick_option(sb, value: str, label: str) -> None:
 def _read_open_options(sb) -> list[str]:
     """Read the texts of options in the currently-open mat-select panel."""
     out: list[str] = []
-    for sel in ("mat-option", '[role="option"]'):
+    for sel in ("mat-option", ".mat-mdc-option", '[role="option"]'):
         try:
             els = sb.find_elements(sel, by="css selector")
         except Exception:
@@ -123,16 +187,93 @@ def _close_overlay(sb) -> None:
 
 
 # --- navigation ------------------------------------------------------------
+def _appointment_form_present(sb) -> bool:
+    form_markers = (
+        S.SELECT_CENTRE_TRIGGER
+        + S.SELECT_CATEGORY_TRIGGER
+        + S.SELECT_SUBCATEGORY_TRIGGER
+        + S.CALENDAR_ROOT
+    )
+    if first_present(sb, form_markers, timeout=1):
+        return True
+    return bool(page_has_any_text(sb, S.NO_SLOTS_TEXT) or page_has_any_text(sb, S.NEAREST_SLOT_TEXTS))
+
+
+def _click_start_booking_by_text(sb) -> str:
+    """Click the dashboard booking button by visible action text."""
+    script = r"""
+const needles = [
+  "start new booking",
+  "book appointment",
+  "new booking",
+  "\u0437\u0430\u043f\u0438\u0441\u0430\u0442\u044c\u0441\u044f"
+];
+const nodes = Array.from(document.querySelectorAll(
+  "button,a,[role='button'],.mat-mdc-button-base,.mdc-button,.btn"
+));
+const visible = (el) => {
+  const rect = el.getBoundingClientRect();
+  const style = window.getComputedStyle(el);
+  return rect.width > 0 && rect.height > 0 &&
+    style.visibility !== "hidden" &&
+    style.display !== "none" &&
+    style.pointerEvents !== "none";
+};
+for (const el of nodes) {
+  const text = (el.innerText || el.textContent || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  if (!text || !visible(el)) {
+    continue;
+  }
+  if (needles.some((needle) => text.includes(needle))) {
+    el.scrollIntoView({block: "center", inline: "center"});
+    el.click();
+    return text;
+  }
+}
+return "";
+"""
+    try:
+        return (sb.execute_script(script) or "").strip()
+    except Exception as e:
+        log.debug("Start-booking JS fallback failed: %s", e)
+        return ""
+
+
+def _wait_for_booking_flow(sb, cfg, timeout: float = 25.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        install_turnstile_hook(sb)
+        wait_out_queue(sb, cfg)
+        if _appointment_form_present(sb):
+            return True
+        human_pause(0.4, 0.8)
+    return False
+
+
 def _go_to_booking_page(sb, cfg) -> None:
     """From the dashboard, click into the new-booking / schedule flow."""
     install_turnstile_hook(sb)
     wait_out_queue(sb, cfg)
-    btn = first_visible(sb, S.START_BOOKING_BTN, timeout=10)
+
+    if _appointment_form_present(sb):
+        return
+
+    clicked_text = _click_start_booking_by_text(sb)
+    if clicked_text:
+        log.info("Opening booking flow: %s", clicked_text)
+        if _wait_for_booking_flow(sb, cfg):
+            return
+
+    btn = first_visible(sb, S.START_BOOKING_BTN, timeout=5)
     if btn:
+        log.info("Opening booking flow via selector: %s", btn)
         sb.click(btn, by=by_of(btn))
-        human_pause(2, 4)
-        install_turnstile_hook(sb)
-        wait_out_queue(sb, cfg)
+        if _wait_for_booking_flow(sb, cfg):
+            return
+        log.debug("Clicked start booking, but appointment form did not appear yet.")
     else:
         log.debug("No explicit 'start booking' button — assuming we're already on the form.")
 
@@ -246,16 +387,20 @@ def _clear_appointment_turnstile(
     if not _turnstile_present(sb, timeout=2):
         return
 
-    _try_uc_click(sb)
-    human_pause(1.5, 3.0)
+    log.info("Appointment captcha present; waiting for automatic clearance without GUI click.")
+    _wait_for_turnstile_auto_clear(sb, timeout=4)
     if not _turnstile_present(sb, timeout=2):
-        log.info("Appointment captcha cleared by UC click.")
+        log.info("Appointment captcha cleared automatically.")
         return
 
     if cfg.captcha_enabled and _solve_with_paid_service(sb, cfg):
         log.info("Appointment captcha token injected by paid solver.")
         return
-    log.warning("Appointment captcha remains after automatic attempts.")
+    screenshot(sb, cfg.screenshot_dir, "appointment_captcha_solver_failed", cfg.screenshots_enabled)
+    raise MonitorError(
+        "Appointment captcha did not clear automatically and the captcha solver could not solve it. "
+        "GUI captcha clicking is disabled."
+    )
 
 
 # --- availability parsing --------------------------------------------------

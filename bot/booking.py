@@ -20,7 +20,7 @@ from datetime import datetime
 
 from . import selectors as S
 from .login import wait_out_queue
-from .otp import fill_otp_into_page, get_otp
+from .otp import OTPError, fill_otp_into_page, get_otp
 from .util import (
     by_of,
     first_present,
@@ -410,7 +410,10 @@ def _booking_otp(sb, cfg, prompt: str) -> None:
             "Booking OTP requested after login, but otp.mode=manual. "
             "Configure automatic OTP retrieval before auto-booking."
         )
-    code = get_otp(cfg, prompt=prompt)
+    try:
+        code = get_otp(cfg, prompt=prompt)
+    except OTPError as e:
+        raise BookingError(str(e)) from e
     fill_otp_into_page(sb, code, S.OTP_INPUT, S.OTP_SUBMIT)
 
 

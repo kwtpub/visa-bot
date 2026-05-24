@@ -13,8 +13,8 @@ generated class names.
 # ---------------------------------------------------------------------------
 # Cloudflare Turnstile (challenge widget on the login page)
 # ---------------------------------------------------------------------------
-# SeleniumBase's uc_gui_click_captcha() handles this automatically; these are
-# only used as fallbacks / for detection.
+# Used for Turnstile detection and token injection. GUI captcha click helpers
+# are intentionally not used because they move the real OS mouse.
 TURNSTILE_IFRAME = [
     'iframe[src*="challenges.cloudflare.com"]',
     'iframe[title*="Cloudflare"]',
@@ -70,6 +70,121 @@ LOGIN_ERROR = [
 # ---------------------------------------------------------------------------
 # Cookie consent overlay (OneTrust) — blocks form interaction if not dismissed
 # ---------------------------------------------------------------------------
+# Registration form
+REGISTER_LINK = [
+    '//a[contains(., "Create an account") or contains(., "Create Account") or contains(., "Sign Up") or contains(., "Sign up") or contains(., "Register") or contains(., "New User")]',
+    '//button[contains(., "Create an account") or contains(., "Create Account") or contains(., "Sign Up") or contains(., "Sign up") or contains(., "Register") or contains(., "New User")]',
+    '//*[(@role="button" or self::a or self::button) and contains(normalize-space(), "\u0423 \u043c\u0435\u043d\u044f \u043d\u0435\u0442 \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u0430")]',
+    '//*[(@role="button" or self::a or self::button) and contains(normalize-space(), "\u041d\u0435\u0442 \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u0430")]',
+    '//*[(@role="button" or self::a or self::button) and contains(normalize-space(), "\u0417\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440")]',
+    '//*[(@role="button" or self::a or self::button) and contains(normalize-space(), "\u0421\u043e\u0437\u0434\u0430\u0442\u044c")]',
+]
+REGISTER_EMAIL = [
+    'input[formcontrolname="emailid"]',
+    'input[formcontrolname="email"]',
+    'input#inputEmail',
+    'input[type="email"]',
+]
+REGISTER_PASSWORD = [
+    'input[formcontrolname="password"]',
+    'input#password',
+    'input[type="password"]',
+]
+REGISTER_CONFIRM_PASSWORD = [
+    'input[formcontrolname="confirmPassword"]',
+    'input#confirmPassword',
+    'input[name="confirmPassword"]',
+]
+REGISTER_DIAL_CODE = [
+    'input[formcontrolname="dialcode"]',
+    'input[formcontrolname="dialCode"]',
+    'select[formcontrolname="dialcode"]',
+    'select[formcontrolname="dialCode"]',
+    'mat-select[formcontrolname="dialcode"]',
+    'mat-select[formcontrolname="dialCode"]',
+    'ng-select[formcontrolname="dialcode"] input',
+    'ng-select[formcontrolname="dialCode"] input',
+]
+REGISTER_PHONE = [
+    'input[formcontrolname="contact"]',
+    'input[formcontrolname="contactNumber"]',
+    'input[formcontrolname="phoneNumber"]',
+    'input[name="phone"]',
+]
+REGISTER_FIRST_NAME = [
+    'input[formcontrolname="firstName"]',
+    'input[name="firstName"]',
+    'input#firstName',
+]
+REGISTER_LAST_NAME = [
+    'input[formcontrolname="lastName"]',
+    'input[name="lastName"]',
+    'input#lastName',
+]
+REGISTER_DOB = [
+    'input[formcontrolname="dateOfBirth"]',
+    'input[name="dateOfBirth"]',
+    'input#dateOfBirth',
+]
+REGISTER_PASSPORT_NUMBER = [
+    'input[formcontrolname="passportNumber"]',
+    'input[name="passportNumber"]',
+    'input#passportNumber',
+]
+REGISTER_NATIONALITY_SELECT = [
+    'mat-select[formcontrolname="nationality"]',
+    'select[formcontrolname="nationality"]',
+    'ng-select[formcontrolname="nationality"] input',
+]
+REGISTER_CHECKBOX_CONTROLS = [
+    "processPerDataAgreed",
+    "intTransPerDataAgreed",
+    "termAndConditionAgreed",
+]
+REGISTER_SUBMIT = [
+    '//button[contains(., "Register") or contains(., "Create") or contains(., "Submit") or contains(., "Continue")]',
+    '//button[contains(., "\u0417\u0430\u0440\u0435\u0433") or contains(., "\u0421\u043e\u0437\u0434\u0430") or contains(., "\u041f\u0440\u043e\u0434\u043e\u043b\u0436")]',
+    'button[type="submit"]',
+    'button[id*="submit"]',
+]
+REGISTER_ERROR = [
+    'div.alert-danger',
+    'div.alert-error',
+    'mat-error',
+    '.error-message',
+    '.c-brand-error',
+    '//*[contains(text(), "already") or contains(text(), "exists") or contains(text(), "Invalid")]',
+    '//*[contains(text(), "\u0443\u0436\u0435") or contains(text(), "\u043e\u0448\u0438\u0431") or contains(text(), "\u043d\u0435\u0432\u0435\u0440")]',
+]
+REGISTER_SUCCESS_TEXTS = [
+    "registered successfully",
+    "registration successful",
+    "account has been created",
+    "activation link",
+    "activation email",
+    "email has been sent",
+    "\u0443\u0441\u043f\u0435\u0448\u043d\u043e",
+    "\u0441\u0441\u044b\u043b\u043a",
+    "\u0430\u043a\u0442\u0438\u0432",
+]
+REGISTER_ALREADY_EXISTS_TEXTS = [
+    "already registered",
+    "already exists",
+    "user exists",
+    "email already",
+    "\u0443\u0436\u0435 \u0437\u0430\u0440\u0435\u0433",
+    "\u0443\u0436\u0435 \u0441\u0443\u0449\u0435\u0441\u0442",
+]
+REGISTER_ACTIVATED_TEXTS = [
+    "account activated",
+    "email verified",
+    "activation successful",
+    "activated successfully",
+    "\u0430\u043a\u0442\u0438\u0432\u0438\u0440",
+    "\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434",
+]
+
+# Cookie consent overlay (OneTrust)
 COOKIE_ACCEPT_BTN = [
     '#onetrust-accept-btn-handler',           # "Accept All Cookies"
     '#onetrust-reject-all-handler',           # "Accept Only Necessary" (also works)
