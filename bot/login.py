@@ -1131,6 +1131,61 @@ def _wait_for_login_page_usable(sb, timeout: float = 25.0) -> bool:
     return _login_form_or_turnstile_present(sb)
 
 
+def _window_is_dead(error: Exception) -> bool:
+    """True if the error means the browser tab/target is gone (not just a slow
+    load). A stalled proxy that resolves to ERR_TIMED_OUT can leave Chrome's
+    target closed, after which every navigation throws this."""
+    msg = str(error).lower()
+    return (
+        "no such window" in msg
+        or "web view not found" in msg
+        or "target window already closed" in msg
+        or "target closed" in msg
+        or "no such execution context" in msg
+    )
+
+
+def _recover_dead_window(sb) -> bool:
+    """Try to get a usable window back after the active target was closed.
+
+    Switches to any surviving handle, or opens a fresh tab/window. Returns True
+    if a live window is available afterwards. Drives the raw Selenium driver
+    (`sb.driver`) directly, so it works for both the real SeleniumBase object
+    and the attach-mode SeleniumDriverAdapter."""
+    driver = getattr(sb, "driver", None)
+    if driver is None:
+        return False
+    # 1) Switch to a surviving handle if one exists.
+    try:
+        handles = list(getattr(driver, "window_handles", []) or [])
+        if handles:
+            driver.switch_to.window(handles[-1])
+            # Confirm it actually responds.
+            _ = driver.current_url
+            log.info("Recovered a live browser window after the target closed.")
+            return True
+    except Exception as e:
+        log.debug("Could not switch to a surviving window: %s", e)
+    # 2) Open a brand-new window/tab and switch to it.
+    for opener in (
+        lambda: driver.switch_to.new_window("tab"),
+        lambda: driver.switch_to.new_window("window"),
+        lambda: driver.execute_script("window.open('about:blank', '_blank');"),
+    ):
+        try:
+            opener()
+            handles = list(getattr(driver, "window_handles", []) or [])
+            if handles:
+                driver.switch_to.window(handles[-1])
+                _ = driver.current_url
+                log.info("Opened a fresh browser window to recover from a closed target.")
+                return True
+        except Exception as e:
+            log.debug("Window-recovery opener failed: %s", e)
+    log.warning("Could not recover a live browser window after the target closed.")
+    return False
+
+
 def _open_login_page(sb, cfg, reconnect_seconds: int = 5) -> None:
     """Open the login page with retry logic for unstable proxies.
 
@@ -1146,6 +1201,14 @@ def _open_login_page(sb, cfg, reconnect_seconds: int = 5) -> None:
         except Exception as e:
             last_error = e
             log.debug("uc_open_with_reconnect failed (attempt %d): %s", attempt, e)
+            # A stalled proxy can leave the tab's target closed; every further
+            # navigation then throws "no such window". Reopen a window first.
+            if _window_is_dead(e):
+                log.warning(
+                    "Browser target closed (attempt %d/%d); recovering the window before retry.",
+                    attempt, max_retries,
+                )
+                _recover_dead_window(sb)
             if not _navigate_without_wait(sb, cfg.login_url):
                 log.debug("fallback navigation also failed (attempt %d).", attempt)
                 if attempt < max_retries:
