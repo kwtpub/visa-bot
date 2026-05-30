@@ -86,28 +86,82 @@ def _register_accounts_from_pool(cfg, account_pool, limit: int) -> int:
         try:
             with open_browser(cfg) as sb:
                 register_account(sb, cfg, account_pool.current)
+                log.info("Verifying registered VFS account by logging in.")
+                perform_login(sb, cfg)
+                if not looks_logged_in(sb):
+                    raise LoginError("Registered account login verification did not reach the dashboard.")
         except RegistrationAlreadyExists as e:
-            log.warning("Registration skipped: %s", e)
-            account_pool.mark_registered()
-            ready += 1
+            log.warning("Registration skipped (already exists): %s", e)
+            account_pool.mark_needs_activation(str(e))
         except RegistrationError as e:
             log.error("Registration failed: %s", e)
             account_pool.mark_registration_failure(str(e))
+        except RateLimited as e:
+            log.error("Registered account login verification failed: %s", e)
+            reason = str(e)
+            if _looks_account_banned(reason):
+                account_pool.mark_banned(reason)
+            else:
+                account_pool.mark_failure(reason, restricted=True)
+        except EdgeBlocked as e:
+            log.error("Registration blocked by VFS edge protection: %s", e)
+            account_pool.mark_needs_registration(str(e))
+            break
+        except LoginError as e:
+            log.error("Registered account login verification failed: %s", e)
+            reason = str(e)
+            if "not registered" in reason.lower() or "не зарегистр" in reason.lower():
+                account_pool.mark_needs_registration(reason)
+            elif _looks_login_verification_transient(reason):
+                account_pool.mark_failure(reason)
+            else:
+                account_pool.mark_registered()
         except Exception as e:  # pragma: no cover - live VFS/browser failures
             log.exception("Unexpected registration error: %s", e)
             account_pool.mark_registration_failure(str(e))
         else:
-            account_pool.mark_registered()
+            account_pool.mark_success()
             ready += 1
 
     log.info("Account registration finished: %d/%d account(s) ready.", ready, attempted)
     return ready
 
 
+def _looks_account_banned(reason: str) -> bool:
+    text = str(reason or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "429201",
+            "account blocked",
+            "аккаунт заблокирован",
+            "temporarily blocked this account/user",
+        )
+    )
+
+
+def _looks_login_verification_transient(reason: str) -> bool:
+    text = str(reason or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "did not reach the dashboard",
+            "session expired",
+            "session is invalid",
+            "401",
+            "сессия истекла",
+            "недействительна",
+        )
+    )
+
+
 def _select_pool_account_for_login(cfg, account_pool) -> bool:
     if not account_pool:
         return True
     registered_only = cfg.registration_auto_register
+    if not registered_only and account_pool.select_next(registered_only=True):
+        account_pool.apply_current()
+        return True
     if not account_pool.select_next(registered_only=registered_only):
         if registered_only:
             log.error("No registered account available in account pool.")
@@ -255,12 +309,12 @@ def run(argv: list[str] | None = None) -> int:
                 except RateLimited as e:
                     notifier.error("login (rate-limited)", e)
                     log.error("%s", e)
+                    if args.once:
+                        return 1
                     if account_pool:
                         if rotate_account_after_error(e, restricted=True):
                             consecutive_failures = 0
                             continue
-                        return 1
-                    if args.once:
                         return 1
                     # long back-off before trying a whole new session
                     log.info("Backing off 90 minutes due to rate limit…")
@@ -276,12 +330,12 @@ def run(argv: list[str] | None = None) -> int:
                     log.error("%s", e)
                     text = str(e).lower()
                     bad_credentials = "email/password" in text or "login rejected" in text
+                    if args.once:
+                        return 1
                     if account_pool:
                         if rotate_account_after_error(e, bad_credentials=bad_credentials):
                             consecutive_failures = 0
                             continue
-                        return 1
-                    if args.once:
                         return 1
                     # could be transient (challenge) — retry after a normal wait
                     sleep_with_jitter(cfg.check_interval, cfg.jitter)
@@ -308,6 +362,8 @@ def run(argv: list[str] | None = None) -> int:
                             login(sb, cfg)
                         except LoginError as e:
                             log.warning("Quick re-login failed: %s", e)
+                            if args.once:
+                                return 1
                             if account_pool:
                                 if rotate_account_after_error(e):
                                     consecutive_failures = 0

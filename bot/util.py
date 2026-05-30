@@ -76,6 +76,17 @@ def by_of(sel: str) -> str:
     return "xpath" if _is_xpath(sel) else "css selector"
 
 
+def xpath_literal(value: str) -> str:
+    """Return a safe XPath string literal for arbitrary text."""
+    text = str(value)
+    if "'" not in text:
+        return f"'{text}'"
+    if '"' not in text:
+        return f'"{text}"'
+    parts = text.split("'")
+    return "concat(" + ", \"'\", ".join(f"'{part}'" for part in parts) + ")"
+
+
 def page_has_any_text(sb, texts: Iterable[str]) -> str | None:
     """Return the first text from `texts` that appears in the page source (case-insensitive)."""
     try:

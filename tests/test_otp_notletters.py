@@ -8,6 +8,7 @@ from bot.otp import (
     _extract_code_from_letters,
     _extract_link_from_letters,
     _notletters_fetch_letters,
+    get_email_link,
     get_otp,
 )
 
@@ -111,3 +112,38 @@ def test_get_otp_notletters_does_not_fallback_to_console():
         assert get_otp(cfg) == "654321"
 
     reader.assert_called_once()
+
+
+def test_get_email_link_retries_without_search_filter():
+    cfg = Config(raw={
+        "otp": {
+            "mode": "notletters",
+            "notletters": {
+                "api_key": "API-KEY",
+                "base_url": "https://api.notletters.com",
+                "email": "mail@example.com",
+                "password": "mail-pass",
+                "poll_seconds": 2,
+                "wait_seconds": 5,
+            },
+        }
+    })
+    now = int(time.time())
+    empty = []
+    welcome = [
+        {
+            "sender": "donotreply@vfsglobal.com",
+            "subject": "Welcome",
+            "letter": {
+                "text": "https://visa.vfsglobal.com/rus/ru/svn/activateemail?q=abc",
+            },
+            "date": now,
+        }
+    ]
+
+    with mock.patch("bot.otp._notletters_fetch_letters", side_effect=[empty, welcome]) as fetch:
+        link = get_email_link(cfg, search="VFS", href_contains="activateemail", wait_seconds=5)
+
+    assert link == "https://visa.vfsglobal.com/rus/ru/svn/activateemail?q=abc"
+    assert fetch.call_args_list[0].kwargs["search"] == "VFS"
+    assert fetch.call_args_list[1].kwargs["search"] == ""

@@ -29,5 +29,7 @@ needed/
 
 # Local handoff / external CLI artifacts
 handoff.md
+debug_activation_page.py
+debug_html/
 .antigravitycli/
 pytest-cache-files-*/

@@ -7,6 +7,9 @@ PyYAML>=6.0
 # Telegram notifications (lightweight, no extra deps)
 requests>=2.31.0
 
+# Chrome DevTools Protocol websocket fallback used by registration navigation.
+websocket-client>=1.8.0
+
 # Optional: read OTP codes from an IMAP mailbox automatically.
 # If you don't configure IMAP, the bot falls back to manual console input.
 # (stdlib imaplib is used — nothing to install)

@@ -79,6 +79,34 @@ def test_account_pool_rotates_and_persists_cooldown(tmp_path: Path):
     assert saved["accounts"][first]["status"] == "restricted"
 
 
+def test_account_pool_rotation_prefers_ready_accounts(tmp_path: Path):
+    emails = tmp_path / "emails.txt"
+    state = tmp_path / "state.json"
+    emails.write_text(
+        "fresh@example.com:p1\nready@example.com:p2\nother@example.com:p3\n",
+        encoding="utf-8",
+    )
+    cfg = Config(raw={
+        "account": {"email": "old@example.com", "password": "vfs-pass"},
+        "otp": {"mode": "notletters", "notletters": {"api_key": "KEY"}},
+        "session": {},
+        "account_pool": {
+            "enabled": True,
+            "accounts_file": str(emails),
+            "state_file": str(state),
+            "vfs_password": "vfs-pass",
+            "max_failures_per_account": 1,
+        },
+    })
+    pool = AccountPool(cfg, _read_accounts_file(emails, vfs_password="vfs-pass"))
+    pool.accounts[1].status = "healthy"
+    pool.current = pool.accounts[0]
+
+    assert pool.rotate_after_failure(cfg, "login failed") is True
+
+    assert pool.current.email == "ready@example.com"
+
+
 def test_account_pool_registration_status_controls_registered_selection(tmp_path: Path):
     emails = tmp_path / "emails.txt"
     state = tmp_path / "state.json"
@@ -105,3 +133,58 @@ def test_account_pool_registration_status_controls_registered_selection(tmp_path
     assert pool.select_next(registered_only=True).email == first
     saved = json.loads(state.read_text(encoding="utf-8"))
     assert saved["accounts"][first]["status"] == "registered"
+
+
+def test_account_pool_prefers_fresh_before_needs_activation(tmp_path: Path):
+    emails = tmp_path / "emails.txt"
+    state = tmp_path / "state.json"
+    emails.write_text("one@example.com:p1\ntwo@example.com:p2\n", encoding="utf-8")
+    cfg = Config(raw={
+        "account": {"email": "old@example.com", "password": "vfs-pass"},
+        "otp": {"mode": "notletters", "notletters": {"api_key": "KEY"}},
+        "session": {},
+        "account_pool": {
+            "enabled": True,
+            "accounts_file": str(emails),
+            "state_file": str(state),
+            "vfs_password": "vfs-pass",
+        },
+    })
+    pool = AccountPool(cfg, _read_accounts_file(emails, vfs_password="vfs-pass"))
+
+    assert pool.select_for_registration() is not None
+    first = pool.current.email
+    pool.mark_needs_activation("VFS says this email is already registered")
+
+    assert pool.select_next(registered_only=True) is None
+    assert pool.select_for_registration().email != first
+    pool.mark_registered()
+    assert pool.select_for_registration().email == first
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["accounts"][first]["status"] == "needs_activation"
+
+
+def test_account_pool_mark_banned_excludes_account(tmp_path: Path):
+    emails = tmp_path / "emails.txt"
+    state = tmp_path / "state.json"
+    emails.write_text("one@example.com:p1\ntwo@example.com:p2\n", encoding="utf-8")
+    cfg = Config(raw={
+        "account": {"email": "old@example.com", "password": "vfs-pass"},
+        "otp": {"mode": "notletters", "notletters": {"api_key": "KEY"}},
+        "session": {},
+        "account_pool": {
+            "enabled": True,
+            "accounts_file": str(emails),
+            "state_file": str(state),
+            "vfs_password": "vfs-pass",
+        },
+    })
+    pool = AccountPool(cfg, _read_accounts_file(emails, vfs_password="vfs-pass"))
+
+    assert pool.select_for_registration() is not None
+    first = pool.current.email
+    pool.mark_banned("429201 account blocked")
+
+    assert pool.select_for_registration().email != first
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["accounts"][first]["status"] == "banned"

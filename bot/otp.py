@@ -236,21 +236,25 @@ def _get_link_via_notletters(
 
     while time.time() < deadline:
         try:
-            letters = _notletters_fetch_letters(
-                base_url,
-                api_key,
-                mailbox,
-                password,
-                search=search,
-            )
-            link = _extract_link_from_letters(
-                letters,
-                min_date=started_at,
-                from_contains=from_contains,
-                href_contains=href_contains,
-            )
-            if link:
-                return link
+            searches = [search]
+            if search:
+                searches.append("")
+            for query in searches:
+                letters = _notletters_fetch_letters(
+                    base_url,
+                    api_key,
+                    mailbox,
+                    password,
+                    search=query,
+                )
+                link = _extract_link_from_letters(
+                    letters,
+                    min_date=started_at,
+                    from_contains=from_contains,
+                    href_contains=href_contains,
+                )
+                if link:
+                    return link
         except Exception as e:
             log.debug("NotLetters link poll error for %s: %s", _mask_email(mailbox), e)
         log.info("Waiting for NotLetters email link... (%.0fs left)", deadline - time.time())
@@ -275,16 +279,26 @@ def _notletters_fetch_letters(
         filters["search"] = search
     if filters:
         payload["filters"] = filters
-    response = requests.post(
-        f"{base_url}/v1/letters",
-        json=payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        timeout=25,
-    )
-    response.raise_for_status()
+    response = None
+    for attempt in range(1, 4):
+        try:
+            response = requests.post(
+                f"{base_url}/v1/letters",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=25,
+            )
+            response.raise_for_status()
+            break
+        except requests.RequestException:
+            if attempt >= 3:
+                raise
+            time.sleep(min(2 ** attempt, 6))
+    if response is None:
+        return []
     data = response.json()
     letters = (data.get("data") or {}).get("letters") or []
     if not isinstance(letters, list):

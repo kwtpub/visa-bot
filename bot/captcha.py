@@ -37,7 +37,8 @@ class Solver:
 
     def solve_turnstile(self, site_key: str, page_url: str,
                         action: Optional[str] = None,
-                        cdata: Optional[str] = None) -> str:
+                        cdata: Optional[str] = None,
+                        chl_page_data: Optional[str] = None) -> str:
         raise NotImplementedError
 
     def solve_cloudflare_challenge(
@@ -60,11 +61,13 @@ class CapSolver(Solver):
             raise CaptchaError("CapSolver: empty api_key")
         self.api_key = api_key
         self.timeout = max(20, int(timeout_seconds))
+        self.session = requests.Session()
+        self.session.trust_env = False
 
     # --- balance check (handy for diagnostics) --------------------------
     def balance(self) -> Optional[float]:
         try:
-            r = requests.post(
+            r = self.session.post(
                 f"{self.BASE}/getBalance",
                 json={"clientKey": self.api_key},
                 timeout=20,
@@ -81,7 +84,8 @@ class CapSolver(Solver):
     # --- main flow ------------------------------------------------------
     def solve_turnstile(self, site_key: str, page_url: str,
                         action: Optional[str] = None,
-                        cdata: Optional[str] = None) -> str:
+                        cdata: Optional[str] = None,
+                        chl_page_data: Optional[str] = None) -> str:
         if not site_key:
             raise CaptchaError("solve_turnstile: empty site_key")
         if not page_url:
@@ -97,12 +101,14 @@ class CapSolver(Solver):
             meta["action"] = action
         if cdata:
             meta["cdata"] = cdata
+        if chl_page_data:
+            meta["chlPageData"] = chl_page_data
         if meta:
             task["metadata"] = meta
 
         # 1) createTask
         try:
-            r = requests.post(
+            r = self.session.post(
                 f"{self.BASE}/createTask",
                 json={"clientKey": self.api_key, "task": task},
                 timeout=30,
@@ -133,7 +139,7 @@ class CapSolver(Solver):
             time.sleep(delay)
             delay = min(delay + 1.0, 5.0)
             try:
-                r = requests.post(
+                r = self.session.post(
                     f"{self.BASE}/getTaskResult",
                     json={"clientKey": self.api_key, "taskId": task_id},
                     timeout=30,
@@ -186,7 +192,7 @@ class CapSolver(Solver):
             task["html"] = html
 
         try:
-            r = requests.post(
+            r = self.session.post(
                 f"{self.BASE}/createTask",
                 json={"clientKey": self.api_key, "task": task},
                 timeout=30,
@@ -216,7 +222,7 @@ class CapSolver(Solver):
             time.sleep(delay)
             delay = min(delay + 1.0, 5.0)
             try:
-                r = requests.post(
+                r = self.session.post(
                     f"{self.BASE}/getTaskResult",
                     json={"clientKey": self.api_key, "taskId": task_id},
                     timeout=30,
@@ -446,15 +452,17 @@ if (window.__vfsTurnstileHookInstalled) {
 }
 window.__vfsTurnstileHookInstalled = true;
 window.__vfsTurnstileParams = window.__vfsTurnstileParams || [];
+let __vfsTurnstileValue = window.turnstile;
 
 function remember(args, widgetId) {
   try {
     const params = args && args[1] ? args[1] : {};
+    const host = typeof args[0] === 'string' ? document.querySelector(args[0]) : args[0];
     window.__vfsTurnstileParams.push({
-      sitekey: params.sitekey || params.siteKey || null,
-      action: params.action || null,
-      cData: params.cData || params.cdata || null,
-      chlPageData: params.chlPageData || null,
+      sitekey: params.sitekey || params.siteKey || (host && host.getAttribute && host.getAttribute('data-sitekey')) || null,
+      action: params.action || (host && host.getAttribute && host.getAttribute('data-action')) || null,
+      cData: params.cData || params.cdata || (host && host.getAttribute && host.getAttribute('data-cdata')) || null,
+      chlPageData: params.chlPageData || params.chlPageData || null,
       callback: params.callback || null,
       errorCallback: params['error-callback'] || params.errorCallback || null,
       expiredCallback: params['expired-callback'] || params.expiredCallback || null,
@@ -479,7 +487,20 @@ function patch(ts) {
   ts.render = wrapped;
 }
 
-patch(window.turnstile);
+try {
+  Object.defineProperty(window, 'turnstile', {
+    configurable: true,
+    get() {
+      return __vfsTurnstileValue;
+    },
+    set(value) {
+      __vfsTurnstileValue = value;
+      patch(value);
+    },
+  });
+} catch (e) {}
+
+patch(__vfsTurnstileValue);
 if (!window.__vfsTurnstileHookTimer) {
   window.__vfsTurnstileHookTimer = setInterval(() => {
     patch(window.turnstile);
@@ -492,6 +513,14 @@ if (!window.__vfsTurnstileHookTimer) {
 return true;
 })();
 """
+
+
+def turnstile_hook_source_for_cdp() -> str:
+    """Return the Turnstile hook as a valid top-level CDP preload script."""
+    source = _INSTALL_TURNSTILE_HOOK_JS.strip()
+    if source.startswith("return "):
+        source = source[len("return "):].strip()
+    return source.rstrip(";")
 
 
 def extract_turnstile_sitekey(sb) -> Optional[str]:
@@ -595,9 +624,9 @@ def solve_cloudflare_clearance(sb, cfg, website_url: str) -> bool:
     """Solve a Cloudflare managed challenge and inject returned cookies."""
     if not cfg.captcha_enabled:
         return False
-    proxy = (getattr(cfg, "captcha_proxy", "") or getattr(cfg, "proxy", "") or "").strip()
+    proxy = (getattr(cfg, "captcha_proxy", "") or "").strip()
     if not proxy:
-        log.warning("Cloudflare challenge solver needs network.proxy, but proxy is empty.")
+        log.warning("Cloudflare challenge solver needs a remote captcha.proxy; local/browser proxy is not usable by the solver.")
         return False
     try:
         solver = get_solver(cfg)

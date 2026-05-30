@@ -14,7 +14,16 @@ import time
 from dataclasses import dataclass, field
 
 from . import selectors as S
-from .captcha import install_turnstile_hook, solve_cloudflare_clearance
+from .captcha import (
+    CaptchaError,
+    extract_turnstile_metadata,
+    extract_turnstile_sitekey,
+    get_solver,
+    inject_turnstile_token,
+    install_turnstile_hook,
+    solve_cloudflare_clearance,
+)
+from .constants import VFS_TURNSTILE_SITEKEY
 from .login import (
     _solve_with_paid_service,
     _wait_for_turnstile_auto_clear,
@@ -30,6 +39,7 @@ from .util import (
     log,
     page_has_any_text,
     screenshot,
+    xpath_literal,
 )
 
 
@@ -71,6 +81,34 @@ def _wait_select_enabled(sb, sel: str, timeout: float = 20.0) -> bool:
     return False
 
 
+def _wait_for_busy_overlay(sb, timeout: float = 35.0) -> bool:
+    script = r"""
+const selectors = [
+  '#loader', '.loader', '.loader-box', '.ngx-spinner-overlay',
+  '.spinner', '.spinner-border', '.mat-mdc-progress-spinner',
+  'mat-spinner', 'mat-progress-spinner', '.la-ball-clip-rotate'
+];
+const visible = (el) => {
+  const style = window.getComputedStyle(el);
+  const rect = el.getBoundingClientRect();
+  if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  return true;
+};
+return selectors.some(sel => Array.from(document.querySelectorAll(sel)).some(visible));
+"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            busy = bool(sb.execute_script(script))
+        except Exception:
+            busy = False
+        if not busy:
+            return True
+        human_pause(0.4, 0.8)
+    return False
+
+
 def _select_options_visible(sb) -> bool:
     return bool(first_present(sb, S.MAT_OPTION_PANEL + S.MAT_OPTION_ANY, timeout=1))
 
@@ -94,6 +132,8 @@ return true;
 
 
 def _open_select(sb, trigger_selectors, label: str):
+    if not _wait_for_busy_overlay(sb, timeout=35):
+        log.warning("VFS loading overlay is still visible before opening '%s'.", label)
     sel = first_visible(sb, trigger_selectors, timeout=8)
     if not sel:
         raise MonitorError(
@@ -123,14 +163,15 @@ def _pick_option(sb, value: str, label: str) -> None:
     if not value:
         raise MonitorError(f"config.yaml: appointment.{label} is empty.")
     # exact match first, then contains
+    literal = xpath_literal(value)
     xpaths = [
-        f'//mat-option//span[normalize-space()="{value}"]',
-        f'//mat-option[normalize-space()="{value}"]',
-        f'//*[contains(@class, "mat-mdc-option")]//*[normalize-space()="{value}"]',
-        f'//*[@role="option"][normalize-space()="{value}"]',
-        f'//mat-option//span[contains(normalize-space(), "{value}")]',
-        f'//*[contains(@class, "mat-mdc-option")]//*[contains(normalize-space(), "{value}")]',
-        f'//*[@role="option"][contains(normalize-space(), "{value}")]',
+        f'//mat-option//span[normalize-space()={literal}]',
+        f'//mat-option[normalize-space()={literal}]',
+        f'//*[contains(@class, "mat-mdc-option")]//*[normalize-space()={literal}]',
+        f'//*[@role="option"][normalize-space()={literal}]',
+        f'//mat-option//span[contains(normalize-space(), {literal})]',
+        f'//*[contains(@class, "mat-mdc-option")]//*[contains(normalize-space(), {literal})]',
+        f'//*[@role="option"][contains(normalize-space(), {literal})]',
     ]
     deadline = time.time() + 20
     opts: list[str] = []
@@ -279,7 +320,9 @@ def _go_to_booking_page(sb, cfg) -> None:
 
 
 def _select_appointment_params(sb, cfg) -> None:
+    _reset_login_turnstile_stub_for_booking(sb)
     install_turnstile_hook(sb)
+    _ensure_turnstile_api_script(sb)
     _handle_appointment_captcha(sb, cfg)
 
     appt = cfg.appointment
@@ -336,19 +379,91 @@ def _handle_appointment_captcha(
         return
 
     log.warning("Appointment captcha shown after selecting parameters; solving automatically.")
-    screenshot(sb, cfg.screenshot_dir, "appointment_captcha", cfg.screenshots_enabled)
-    _clear_appointment_turnstile(sb, cfg, website_url=website_url)
+    _reset_login_turnstile_stub_for_booking(sb)
+    install_turnstile_hook(sb)
+    _ensure_turnstile_api_script(sb)
+    for attempt in range(1, 3):
+        screenshot(sb, cfg.screenshot_dir, "appointment_captcha", cfg.screenshots_enabled)
+        _clear_appointment_turnstile(
+            sb,
+            cfg,
+            website_url=website_url,
+            prefer_native_token=attempt == 1,
+        )
 
-    submit = first_visible(sb, S.CAPTCHA_SUBMIT_BTN, timeout=5)
-    if submit:
-        sb.click(submit, by=by_of(submit))
-        log.info("Submitted appointment captcha.")
-        human_pause(2, 4)
-        wait_out_queue(sb, cfg)
+        submit = first_visible(sb, S.CAPTCHA_SUBMIT_BTN, timeout=5)
+        if submit:
+            sb.click(submit, by=by_of(submit))
+            log.info("Submitted appointment captcha.")
+            _wait_for_appointment_captcha_to_close(sb, cfg, timeout=15)
 
-    if _visible_appointment_captcha(sb):
-        screenshot(sb, cfg.screenshot_dir, "appointment_captcha_still_present", cfg.screenshots_enabled)
-        raise MonitorError("Appointment captcha is still present after automatic solving.")
+        if not _visible_appointment_captcha(sb):
+            return
+        if attempt < 2:
+            log.warning("Appointment captcha is still present; retrying with a fresh token.")
+
+    screenshot(sb, cfg.screenshot_dir, "appointment_captcha_still_present", cfg.screenshots_enabled)
+    raise MonitorError("Appointment captcha is still present after automatic solving.")
+
+
+def _reset_login_turnstile_stub_for_booking(sb) -> None:
+    """Remove the login-only Turnstile stub before SPA booking captchas render."""
+    script = r"""
+return (() => {
+  const renderText = (() => {
+    try { return String(window.turnstile && window.turnstile.render || ''); }
+    catch (e) { return ''; }
+  })();
+  const hadLoginStub = !!window.__vfsTurnstileStub || renderText.includes('vfs-login-stub');
+  if (!hadLoginStub) return false;
+  try { delete window.turnstile; } catch (e) {}
+  try { delete window.__vfsTurnstileStub; } catch (e) {}
+  try { delete window.__vfsTurnstileToken; } catch (e) {}
+  try { window.__vfsTurnstileParams = []; } catch (e) {}
+  try { delete window.__vfsTurnstileHookInstalled; } catch (e) {}
+  try {
+    if (window.__vfsTurnstileHookTimer) clearInterval(window.__vfsTurnstileHookTimer);
+    delete window.__vfsTurnstileHookTimer;
+  } catch (e) {}
+  return true;
+})();
+"""
+    try:
+        if sb.execute_script(script):
+            log.info("Cleared login Turnstile stub before booking captcha.")
+    except Exception as e:
+        log.debug("Could not clear login Turnstile stub: %s", e)
+
+
+def _ensure_turnstile_api_script(sb) -> None:
+    script = r"""
+return (() => {
+  try {
+    const render = window.turnstile && window.turnstile.render;
+    if (typeof render === 'function' && !String(render).includes('vfs-login-stub')) {
+      return false;
+    }
+  } catch (e) {}
+  try {
+    document.querySelectorAll('script[data-vfs-turnstile-reload="true"]').forEach(el => el.remove());
+    const s = document.createElement('script');
+    s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&vfs_reload=' + Date.now();
+    s.async = true;
+    s.defer = true;
+    s.setAttribute('data-vfs-turnstile-reload', 'true');
+    document.head.appendChild(s);
+    return true;
+  } catch (e) {
+    return false;
+  }
+})();
+"""
+    try:
+        if sb.execute_script(script):
+            log.info("Reloaded Turnstile API for booking captcha.")
+            human_pause(0.8, 1.4)
+    except Exception as e:
+        log.debug("Could not reload Turnstile API: %s", e)
 
 
 def _visible_appointment_captcha(sb) -> str | None:
@@ -378,11 +493,20 @@ def _clear_appointment_turnstile(
     sb,
     cfg,
     website_url: str = "https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable",
+    prefer_native_token: bool = True,
 ) -> None:
     """Clear Turnstile on the current appointment page without navigating away."""
     clearance_ok = cfg.captcha_enabled and solve_cloudflare_clearance(sb, cfg, website_url)
     if clearance_ok:
         log.info("Appointment Cloudflare API clearance injected.")
+
+    if prefer_native_token and _wait_for_native_appointment_token(sb, timeout=12):
+        log.info("Using browser-generated appointment captcha token.")
+        return
+
+    if cfg.captcha_enabled and _solve_appointment_turnstile_token(sb, cfg, website_url=website_url):
+        log.info("Appointment captcha token injected by paid solver.")
+        return
 
     if not _turnstile_present(sb, timeout=2):
         return
@@ -401,6 +525,96 @@ def _clear_appointment_turnstile(
         "Appointment captcha did not clear automatically and the captcha solver could not solve it. "
         "GUI captcha clicking is disabled."
     )
+
+
+def _wait_for_appointment_captcha_to_close(sb, cfg, timeout: float = 15.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        wait_out_queue(sb, cfg)
+        if not _visible_appointment_captcha(sb):
+            return True
+        human_pause(0.5, 1.0)
+    return False
+
+
+def _wait_for_native_appointment_token(sb, timeout: float = 12.0) -> bool:
+    script = r"""
+const inputs = Array.from(document.querySelectorAll('input[name="cf-turnstile-response"]'));
+let ok = false;
+for (const input of inputs) {
+  const value = input.value || '';
+  if (value.length > 40) {
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    input.dispatchEvent(new Event('change', {bubbles: true}));
+    ok = true;
+  }
+}
+return ok;
+"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if sb.execute_script(script) is True:
+                return True
+        except Exception:
+            pass
+        human_pause(0.4, 0.8)
+    return False
+
+
+def _solve_appointment_turnstile_token(sb, cfg, website_url: str) -> bool:
+    try:
+        solver = get_solver(cfg)
+    except (CaptchaError, AttributeError) as e:
+        log.warning("Captcha solver disabled: %s", e)
+        return False
+    if solver is None:
+        return False
+
+    sitekey = extract_turnstile_sitekey(sb) or VFS_TURNSTILE_SITEKEY
+    meta = extract_turnstile_metadata(sb)
+    sitekey = meta.get("sitekey") or sitekey
+    try:
+        page_url = sb.get_current_url() or website_url
+    except Exception:
+        page_url = website_url
+
+    log.info("Solving appointment Turnstile (sitekey=%s…, url=%s)", sitekey[:12], page_url)
+    try:
+        token = solver.solve_turnstile(
+            sitekey,
+            page_url,
+            action=meta.get("action") or None,
+            cdata=meta.get("cData") or None,
+            chl_page_data=meta.get("chlPageData") or None,
+        )
+    except CaptchaError as e:
+        log.error("Appointment captcha solver failed: %s", e)
+        return False
+    _ensure_appointment_turnstile_input(sb)
+    return inject_turnstile_token(sb, token)
+
+
+def _ensure_appointment_turnstile_input(sb) -> None:
+    script = r"""
+return (() => {
+  if (document.querySelector('input[name="cf-turnstile-response"]')) return false;
+  const root = document.querySelector('app-cloudflare-dialog')
+    || document.querySelector('mat-dialog-container')
+    || document.body;
+  const input = document.createElement('input');
+  input.type = 'hidden';
+  input.name = 'cf-turnstile-response';
+  input.id = 'cf-chl-widget-vfs_response';
+  root.appendChild(input);
+  return true;
+})();
+"""
+    try:
+        if sb.execute_script(script):
+            log.info("Created missing appointment Turnstile response input.")
+    except Exception as e:
+        log.debug("Could not create appointment Turnstile response input: %s", e)
 
 
 # --- availability parsing --------------------------------------------------

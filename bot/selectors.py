@@ -30,7 +30,10 @@ EDGE_BLOCK_TEXTS = [
     "Sorry, you have been blocked",
     "error code: 1020",
     "403201",
+    "429201",
     "Access denied",
+    "Account blocked",
+    "Аккаунт заблокирован",
 ]
 
 # ---------------------------------------------------------------------------
@@ -153,8 +156,8 @@ REGISTER_ERROR = [
     'mat-error',
     '.error-message',
     '.c-brand-error',
-    '//*[contains(text(), "already") or contains(text(), "exists") or contains(text(), "Invalid")]',
-    '//*[contains(text(), "\u0443\u0436\u0435") or contains(text(), "\u043e\u0448\u0438\u0431") or contains(text(), "\u043d\u0435\u0432\u0435\u0440")]',
+    '//*[self::mat-error or contains(@class, "error") or contains(@class, "alert")][contains(text(), "already") or contains(text(), "exists") or contains(text(), "Invalid")]',
+    '//*[self::mat-error or contains(@class, "error") or contains(@class, "alert")][contains(text(), "\u0443\u0436\u0435") or contains(text(), "\u043e\u0448\u0438\u0431") or contains(text(), "\u043d\u0435\u0432\u0435\u0440")]',
 ]
 REGISTER_SUCCESS_TEXTS = [
     "registered successfully",
@@ -182,6 +185,18 @@ REGISTER_ACTIVATED_TEXTS = [
     "activated successfully",
     "\u0430\u043a\u0442\u0438\u0432\u0438\u0440",
     "\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434",
+]
+ACTIVATION_EMAIL = [
+    'input[formcontrolname="emailid"]',
+    'input[formcontrolname="email"]',
+    'input[type="email"]',
+    'input#email',
+]
+ACTIVATION_SUBMIT = [
+    '//button[contains(., "Activate") or contains(., "Submit") or contains(., "Continue")]',
+    '//button[contains(., "\u0410\u043a\u0442\u0438\u0432\u0438\u0440\u043e\u0432\u0430\u0442\u044c") or contains(., "\u041f\u0440\u043e\u0434\u043e\u043b\u0436")]',
+    'button[type="submit"]',
+    'button.btn-brand-orange',
 ]
 
 # Cookie consent overlay (OneTrust)
@@ -225,6 +240,8 @@ START_BOOKING_BTN = [
     '//*[self::button or self::a][contains(., "\u0417\u0430\u043f\u0438\u0441\u0430\u0442\u044c\u0441\u044f \u043d\u0430 \u043f\u0440\u0438\u0435\u043c") or contains(., "\u0417\u0430\u043f\u0438\u0441\u0430\u0442\u044c\u0441\u044f \u043d\u0430 \u043f\u0440\u0438\u0451\u043c")]',
     'a[href*="schedule-appointment"]',
     'button.btn-book',
+    'button.btn-brand-orange',
+    'button[class*="btn-brand-orange"]',
 ]
 
 # ---------------------------------------------------------------------------
@@ -238,18 +255,23 @@ SELECT_CENTRE_TRIGGER = [
     'mat-select[formcontrolname="visaApplicationCentre"]',
     '#mat-select-0',
     '//mat-label[contains(., "Centre") or contains(., "Center") or contains(., "\u0426\u0435\u043d\u0442\u0440")]/ancestor::mat-form-field//mat-select',
+    '//mat-label[contains(., "\u0446\u0435\u043d\u0442\u0440") or contains(., "\u0426\u0435\u043d\u0442\u0440")]/ancestor::mat-form-field//mat-select',
 ]
 SELECT_CATEGORY_TRIGGER = [
     'mat-select[formcontrolname="selectedSubvisaCategory"]',
     'mat-select[formcontrolname="category"]',
     'mat-select[formcontrolname="visaCategory"]',
+    '#mat-select-2',
     '//mat-label[contains(., "Category") or contains(., "\u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u044e \u0437\u0430\u043f\u0438\u0441\u0438")]/ancestor::mat-form-field//mat-select',
+    '//mat-label[contains(., "\u041a\u0430\u0442\u0435\u0433\u043e\u0440") or contains(., "\u043a\u0430\u0442\u0435\u0433\u043e\u0440")]/ancestor::mat-form-field//mat-select',
 ]
 SELECT_SUBCATEGORY_TRIGGER = [
     'mat-select[formcontrolname="visaCategoryCode"]',
     'mat-select[formcontrolname="subCategory"]',
     'mat-select[formcontrolname="visaSubCategory"]',
+    '#mat-select-1',
     '//mat-label[contains(., "Sub") or contains(., "Sub-category") or contains(., "Sub category") or contains(., "\u043f\u043e\u0434\u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u044e")]/ancestor::mat-form-field//mat-select',
+    '//mat-label[contains(., "\u041f\u043e\u0434\u043a\u0430\u0442") or contains(., "\u043f\u043e\u0434\u043a\u0430\u0442")]/ancestor::mat-form-field//mat-select',
 ]
 # The popup panel that opens, and an individual option inside it:
 MAT_OPTION_PANEL = ['div.cdk-overlay-pane', 'div.mat-select-panel', 'div[role="listbox"]']
@@ -259,6 +281,7 @@ MAT_OPTION_ANY = ['mat-option', 'mat-option span.mat-option-text', '[role="optio
 CONTINUE_BTN = [
     '//button[contains(., "Continue") or contains(., "Submit") or contains(., "Proceed") or contains(., "Next")]',
     '//button[contains(., "\u041f\u0440\u043e\u0434\u043e\u043b\u0436\u0438\u0442\u044c")]',
+    '//*[self::button or self::a][normalize-space()="\u041f\u0440\u043e\u0434\u043e\u043b\u0436\u0438\u0442\u044c"]',
 ]
 
 APPOINTMENT_CAPTCHA_TEXTS = [
@@ -266,6 +289,9 @@ APPOINTMENT_CAPTCHA_TEXTS = [
     "Verify you are human",
 ]
 CAPTCHA_SUBMIT_BTN = [
+    '//mat-dialog-container//button[normalize-space()="Submit"]',
+    '//mat-dialog-container//button[contains(., "Submit")]',
+    'mat-dialog-container button[type="submit"]',
     '//button[normalize-space()="Submit"]',
     '//button[contains(., "Submit")]',
     'button[type="submit"]',
@@ -336,44 +362,72 @@ APPLICANT_FIELDS = {
         'input[formcontrolname="firstName"]',
         'input[name="firstName"]',
         '#firstName',
+        '//app-dynamic-control[contains(., "\u0418\u043c\u044f") and not(contains(., "\u0424\u0430\u043c\u0438\u043b"))]//input',
+        'input[placeholder*="\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u0441\u0432\u043e\u0435 \u0438\u043c\u044f"]',
         'input[placeholder*="\u0438\u043c\u044f"]',
+        '#mat-input-3',
     ],
     "last_name": [
         'input[formcontrolname="lastName"]',
         'input[name="lastName"]',
         '#lastName',
+        '//app-dynamic-control[contains(., "\u0424\u0430\u043c\u0438\u043b")]//input',
+        'input[placeholder*="\u041f\u043e\u0436\u0430\u043b\u0443\u0439\u0441\u0442\u0430, \u0432\u0432\u0435\u0434\u0438\u0442\u0435 \u0444\u0430\u043c\u0438\u043b\u0438\u044e"]',
         'input[placeholder*="\u0444\u0430\u043c\u0438\u043b"]',
+        '#mat-input-4',
     ],
     "passport_number": [
         'input[formcontrolname="passportNumber"]',
         'input[name="passportNumber"]',
         '#passportNumber',
+        '//app-dynamic-control[contains(., "\u041d\u043e\u043c\u0435\u0440 \u043f\u0430\u0441\u043f\u043e\u0440\u0442\u0430")]//input',
+        'input[placeholder*="\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043d\u043e\u043c\u0435\u0440 \u043f\u0430\u0441\u043f\u043e\u0440\u0442\u0430"]',
         'input[placeholder*="\u043d\u043e\u043c\u0435\u0440 \u043f\u0430\u0441\u043f\u043e\u0440\u0442"]',
+        '#mat-input-5',
     ],
     "passport_expiry": ['input[formcontrolname="passportExpiryDate"]', 'input[name="passportExpiry"]', '#passportExpiry'],
-    "date_of_birth": ['input[formcontrolname="dateOfBirth"]', 'input[name="dateOfBirth"]', '#dateOfBirth'],
+    "date_of_birth": [
+        'input[formcontrolname="dateOfBirth"]',
+        'input[name="dateOfBirth"]',
+        '#dateOfBirth',
+        '//app-dynamic-control[contains(., "\u0414\u0430\u0442\u0430 \u0440\u043e\u0436\u0434\u0435\u043d\u0438\u044f")]//input',
+        'input[placeholder*="\u0414\u0414"]',
+    ],
     "phone_country_code": [
         'input[formcontrolname="phoneCountryCode"]',
         'input[name="phoneCountryCode"]',
         '//app-dynamic-control[contains(., "\u041a\u043e\u043d\u0442\u0430\u043a\u0442\u043d\u044b\u0439 \u043d\u043e\u043c\u0435\u0440")]//input[@maxlength="3"]',
+        '#mat-input-6',
     ],
     "phone_number": [
         'input[formcontrolname="contactNumber"]',
         'input[name="phone"]',
         '#phone',
         '//app-dynamic-control[contains(., "\u041a\u043e\u043d\u0442\u0430\u043a\u0442\u043d\u044b\u0439 \u043d\u043e\u043c\u0435\u0440")]//input[@maxlength="15"]',
+        '#mat-input-7',
     ],
-    "email": ['input[formcontrolname="email"]', 'input[name="email"]', '#email', 'input[type="email"]'],
+    "email": [
+        'input[formcontrolname="email"]',
+        'input[name="email"]',
+        '#email',
+        'input[type="email"]',
+        'input[placeholder*="\u0430\u0434\u0440\u0435\u0441 \u044d\u043b\u0435\u043a\u0442\u0440\u043e\u043d\u043d\u043e\u0439 \u043f\u043e\u0447\u0442\u044b"]',
+        '#mat-input-8',
+    ],
 }
 APPLICANT_GENDER_SELECT = [
     'mat-select[formcontrolname="gender"]',
     'select[name="gender"]',
     '//app-dynamic-control[contains(., "\u041f\u043e\u043b")]//mat-select',
+    '//app-dynamic-control[contains(., "\u043f\u043e\u043b")]//mat-select',
+    '#mat-select-3',
 ]
 APPLICANT_NATIONALITY_SELECT = [
     'mat-select[formcontrolname="nationality"]',
     'select[name="nationality"]',
     '//app-dynamic-control[contains(., "\u0433\u0440\u0430\u0436\u0434\u0430\u043d\u0441\u0442\u0432\u043e")]//mat-select',
+    '//app-dynamic-control[contains(., "\u0413\u0440\u0430\u0436\u0434\u0430\u043d\u0441\u0442\u0432\u043e")]//mat-select',
+    '#mat-select-4',
 ]
 YOUR_DETAILS_PAGE = [
     '#dateOfBirth',
@@ -382,6 +436,8 @@ YOUR_DETAILS_PAGE = [
 YOUR_DETAILS_SAVE_BTN = [
     '//button[contains(., "Save")]',
     '//button[contains(., "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c")]',
+    '//button[contains(., "Update")]',
+    '//button[contains(., "\u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c")]',
 ]
 ADD_APPLICANT_BTN = [
     '//button[contains(., "Add Applicant") or contains(., "Add applicant") or contains(., "Add another applicant")]',
@@ -393,6 +449,8 @@ ADD_APPLICANT_BTN = [
 # Final review / confirm:
 REVIEW_CONFIRM_BTN = [
     '//button[contains(., "Confirm") or contains(., "Pay") or contains(., "Book Appointment") or contains(., "Confirm Booking")]',
+    '//button[contains(., "\u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0434") or contains(., "\u041e\u043f\u043b\u0430\u0442") or contains(., "\u0417\u0430\u0431\u0440\u043e\u043d\u0438\u0440")]',
+    '//button[contains(., "\u0417\u0430\u043f\u0438\u0441\u0430\u0442\u044c\u0441\u044f")]',
     'button.btn-confirm',
 ]
 BOOKING_SUCCESS_TEXTS = [
@@ -401,4 +459,7 @@ BOOKING_SUCCESS_TEXTS = [
     "Your appointment has been booked",
     "booking reference",
     "appointment is confirmed",
+    "\u0417\u0430\u043f\u0438\u0441\u044c \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0430",
+    "\u0443\u0441\u043f\u0435\u0448\u043d\u043e \u0437\u0430\u0431\u0440\u043e\u043d\u0438\u0440",
+    "\u043d\u043e\u043c\u0435\u0440 \u0431\u0440\u043e\u043d\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f",
 ]

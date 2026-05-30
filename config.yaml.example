@@ -152,6 +152,11 @@ network:
   # Run the browser without a visible window. Set false the first few runs so
   # you can watch diagnostics; captcha solving still stays automated.
   headless: false
+  # Keep a real non-headless Chrome for VFS, but move it off-screen so it does
+  # not steal your desktop while you use the PC. Set false when debugging UI.
+  background_browser: false
+  window_position: [-32000, 0]
+  window_size: [1280, 900]
   # Pin a specific Chrome major version if SeleniumBase picks a wrong one.
   chrome_version: ""        # e.g. "126" — leave empty for auto
   # Optional fixed Chrome profile dir. Usually leave empty; the bot creates a

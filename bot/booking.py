@@ -29,6 +29,7 @@ from .util import (
     log,
     page_has_any_text,
     screenshot,
+    xpath_literal,
 )
 
 
@@ -43,6 +44,39 @@ class BookingResult:
 
 class BookingError(RuntimeError):
     pass
+
+
+MOCK_APPLICANT = {
+    "first_name": "TEST",
+    "last_name": "USER",
+    "passport_number": "7555123456",
+    "passport_expiry": "2031-12-31",
+    "date_of_birth": "1990-01-01",
+    "nationality": "Russian Federation",
+    "gender": "Male",
+    "phone_country_code": "+7",
+    "phone_number": "9001234567",
+    "email": "test.user@example.com",
+}
+
+
+def _use_mock_applicant_data(cfg) -> bool:
+    appt = getattr(cfg, "appointment", {}) or {}
+    return bool(appt.get("use_mock_applicant_data", False))
+
+
+def _mock_applicant(index: int) -> dict[str, str]:
+    data = dict(MOCK_APPLICANT)
+    if index > 0:
+        data["first_name"] = f"TEST{index + 1}"
+        data["email"] = f"test.user{index + 1}@example.com"
+    return data
+
+
+def _applicant_data(cfg, index: int) -> dict:
+    if _use_mock_applicant_data(cfg):
+        return _mock_applicant(index)
+    return cfg.applicants[index]
 
 
 # --- date / time pickers ---------------------------------------------------
@@ -136,7 +170,12 @@ def _normalise_applicant_value(sb, sel: str, key: str, value) -> str:
         input_type = ""
     if input_type == "date":
         return text
-    return datetime.strptime(text, "%Y-%m-%d").strftime("%d%m%Y")
+    try:
+        placeholder = sb.get_attribute(sel, "placeholder", by=by_of(sel)) or ""
+    except Exception:
+        placeholder = ""
+    fmt = "%d/%m/%Y" if "/" in placeholder or "\u0414\u0414" in placeholder else "%d%m%Y"
+    return datetime.strptime(text, "%Y-%m-%d").strftime(fmt)
 
 
 def _clear_and_type(sb, sel: str, text: str) -> None:
@@ -155,6 +194,15 @@ def _clear_and_type(sb, sel: str, text: str) -> None:
             except Exception:
                 pass
             el.send_keys(text)
+            try:
+                sb.execute_script(
+                    "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
+                    "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));"
+                    "arguments[0].blur();",
+                    el,
+                )
+            except Exception:
+                pass
             return
     except Exception as e:
         log.debug("Direct field typing failed for %s: %s", sel, e)
@@ -169,17 +217,27 @@ def _option_aliases(value: str) -> list[str]:
         return [value, "\u041c\u0443\u0436\u0441\u043a\u043e\u0439"]
     if low == "female":
         return [value, "\u0416\u0435\u043d\u0441\u043a\u0438\u0439"]
+    if low in {"russian federation", "russia", "russian", "\u0440\u043e\u0441\u0441\u0438\u044f", "\u0440\u043e\u0441\u0441\u0438\u0439\u0441\u043a\u0430\u044f \u0444\u0435\u0434\u0435\u0440\u0430\u0446\u0438\u044f"}:
+        return [
+            value,
+            "Russian Federation",
+            "RUSSIAN FEDERATION",
+            "Russia",
+            "\u0420\u043e\u0441\u0441\u0438\u0439\u0441\u043a\u0430\u044f \u0424\u0435\u0434\u0435\u0440\u0430\u0446\u0438\u044f",
+            "\u0420\u043e\u0441\u0441\u0438\u044f",
+        ]
     return [value]
 
 
 def _pick_mat_option(sb, values: list[str]) -> bool:
     for value in values:
+        literal = xpath_literal(value)
         xpaths = [
-            f'//mat-option//span[normalize-space()="{value}"]',
-            f'//mat-option[normalize-space()="{value}"]',
-            f'//*[@role="option"][normalize-space()="{value}"]',
-            f'//mat-option//span[contains(normalize-space(), "{value}")]',
-            f'//*[@role="option"][contains(normalize-space(), "{value}")]',
+            f'//mat-option//span[normalize-space()={literal}]',
+            f'//mat-option[normalize-space()={literal}]',
+            f'//*[@role="option"][normalize-space()={literal}]',
+            f'//mat-option//span[contains(normalize-space(), {literal})]',
+            f'//*[@role="option"][contains(normalize-space(), {literal})]',
         ]
         for xp in xpaths:
             if sb.is_element_present(xp, by="xpath"):
@@ -191,10 +249,10 @@ def _pick_mat_option(sb, values: list[str]) -> bool:
 def _fill_applicant(sb, cfg, index: int = 0) -> None:
     """Fill the applicant-details form from config.applicants[index]."""
     applicants = cfg.applicants
-    if not applicants:
+    if not applicants and not _use_mock_applicant_data(cfg):
         raise BookingError("VFS is asking for applicant details, but config.applicants is empty.")
     try:
-        a = applicants[index]
+        a = _applicant_data(cfg, index)
     except IndexError as e:
         raise BookingError(
             f"VFS needs applicant #{index + 1}, but config.applicants has only {len(applicants)} item(s)."
@@ -310,14 +368,17 @@ def _fill_applicants_if_visible(sb, cfg) -> int:
 
     count = _target_applicant_count(cfg)
     if len(cfg.applicants) < count:
-        if count == 1 and not cfg.applicants:
+        if _use_mock_applicant_data(cfg):
+            log.info("Using mock applicant data for dry-run applicant form filling.")
+        elif count == 1 and not cfg.applicants:
             log.info("No applicant data configured; relying on portal pre-filled applicant form.")
             screenshot(sb, cfg.screenshot_dir, "applicant_1_prefilled", cfg.screenshots_enabled)
             _save_your_details(sb, cfg)
             return 1
-        raise BookingError(
-            f"appointment.applicants_count={count}, but config.applicants has only {len(cfg.applicants)} item(s)."
-        )
+        else:
+            raise BookingError(
+                f"appointment.applicants_count={count}, but config.applicants has only {len(cfg.applicants)} item(s)."
+            )
 
     for index in range(count):
         if not _applicant_form_visible(sb):
@@ -328,7 +389,6 @@ def _fill_applicants_if_visible(sb, cfg) -> int:
         if index < count - 1:
             _open_next_applicant_form(sb, cfg, index + 1)
     return count
-
 
 # --- confirm ---------------------------------------------------------------
 def _extract_reference(sb) -> str:
@@ -419,6 +479,10 @@ def _booking_otp(sb, cfg, prompt: str) -> None:
 
 def attempt_booking(sb, cfg, availability) -> BookingResult:
     """Drive booking after monitor.check_availability() found availability."""
+    if _use_mock_applicant_data(cfg) and not getattr(cfg, "auto_book_dry_run", False):
+        raise BookingError(
+            "appointment.use_mock_applicant_data=true requires --dry-run; refusing to submit mock applicant data."
+        )
     preferred = list(getattr(availability, "dates", []) or [])
     chosen_date = preferred[0] if preferred else ""
     calendar_picked = False

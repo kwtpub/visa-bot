@@ -6,6 +6,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
@@ -71,6 +72,34 @@ class Config:
     @property
     def headless(self) -> bool:
         return bool(self.raw.get("network", {}).get("headless", False))
+
+    @property
+    def background_browser(self) -> bool:
+        return bool(self.raw.get("network", {}).get("background_browser", False))
+
+    @property
+    def browser_window_position(self) -> tuple[int, int]:
+        value = self.raw.get("network", {}).get("window_position") or [-32000, 0]
+        if isinstance(value, str):
+            parts = [p.strip() for p in value.split(",", 1)]
+        else:
+            parts = list(value) if isinstance(value, (list, tuple)) else []
+        try:
+            return int(parts[0]), int(parts[1])
+        except Exception:
+            return -32000, 0
+
+    @property
+    def browser_window_size(self) -> tuple[int, int]:
+        value = self.raw.get("network", {}).get("window_size") or [1280, 900]
+        if isinstance(value, str):
+            parts = [p.strip() for p in value.split(",", 1)]
+        else:
+            parts = list(value) if isinstance(value, (list, tuple)) else []
+        try:
+            return max(800, int(parts[0])), max(600, int(parts[1]))
+        except Exception:
+            return 1280, 900
 
     @property
     def chrome_version(self) -> str:
@@ -176,7 +205,10 @@ class Config:
         if value.lower().startswith("env:"):
             env_name = value.split(":", 1)[1].strip()
             value = os.getenv(env_name, "").strip()
-        return value or self.proxy
+        if value:
+            return value
+        proxy = self.proxy
+        return "" if _proxy_is_loopback(proxy) else proxy
 
     @property
     def captcha_enabled(self) -> bool:
@@ -257,7 +289,7 @@ class Config:
 
     @property
     def screenshot_dir(self) -> Path:
-        d = self.raw.get("logging", {}).get("screenshot_dir", "screenshots")
+        d = self.raw.get("logging", {}).get("screenshot_dir") or "screenshots"
         p = Path(d)
         if not p.is_absolute():
             p = Path(__file__).resolve().parent.parent / p
@@ -326,3 +358,12 @@ def load_config(path: Path | None = None) -> Config:
             file=sys.stderr,
         )
     return cfg
+
+
+def _proxy_is_loopback(proxy: str) -> bool:
+    text = str(proxy or "").strip()
+    if not text:
+        return False
+    parsed = urlparse(text if "://" in text else f"http://{text}")
+    host = (parsed.hostname or "").lower()
+    return host in {"127.0.0.1", "localhost", "::1"}

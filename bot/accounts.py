@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -35,6 +36,10 @@ class PoolAccount:
     @property
     def registered(self) -> bool:
         return self.status in {"registered", "healthy"}
+
+    @property
+    def needs_activation(self) -> bool:
+        return self.status == "needs_activation"
 
 
 class AccountPool:
@@ -84,7 +89,12 @@ class AccountPool:
         ]
         if not available:
             return None
-        available.sort(key=lambda acc: (acc.last_used or 0.0, acc.fail_count, acc.email))
+        available.sort(key=lambda acc: (
+            0 if acc.status in {"", "fresh"} else 1 if acc.status == "needs_registration" else 2 if acc.needs_activation else 3,
+            acc.last_used or 0.0,
+            acc.fail_count,
+            acc.email,
+        ))
         self.current = available[0]
         return self.current
 
@@ -97,6 +107,7 @@ class AccountPool:
 
         otp = self.cfg.raw.setdefault("otp", {})
         if str(otp.get("mode") or "manual").lower() == "manual":
+            log.warning("Account pool requires mailbox polling; switching otp.mode from manual to notletters for this account.")
             otp["mode"] = "notletters"
         notletters = otp.setdefault("notletters", {})
         notletters["email"] = acc.email
@@ -136,6 +147,9 @@ class AccountPool:
         self._save_state()
 
     def mark_registration_failure(self, reason: str) -> None:
+        if _looks_activation_needed(reason):
+            self.mark_needs_activation(reason)
+            return
         if not self.current:
             return
         acc = self.current
@@ -147,6 +161,26 @@ class AccountPool:
             acc.cooldown_until = time.time() + self.cooldown_minutes * 60
         else:
             acc.status = "needs_registration"
+        self._save_state()
+
+    def mark_needs_activation(self, reason: str) -> None:
+        if not self.current:
+            return
+        acc = self.current
+        acc.status = "needs_activation"
+        acc.last_error = _short_reason(reason)
+        acc.last_used = time.time()
+        acc.cooldown_until = 0.0
+        self._save_state()
+
+    def mark_needs_registration(self, reason: str) -> None:
+        if not self.current:
+            return
+        acc = self.current
+        acc.status = "needs_registration"
+        acc.last_error = _short_reason(reason)
+        acc.last_used = time.time()
+        acc.cooldown_until = 0.0
         self._save_state()
 
     def mark_failure(self, reason: str, *, restricted: bool = False) -> None:
@@ -176,6 +210,17 @@ class AccountPool:
         acc.last_used = time.time()
         self._save_state()
 
+    def mark_banned(self, reason: str) -> None:
+        if not self.current:
+            return
+        acc = self.current
+        acc.status = "banned"
+        acc.fail_count += 1
+        acc.last_error = _short_reason(reason)
+        acc.last_used = time.time()
+        acc.cooldown_until = 0.0
+        self._save_state()
+
     def rotate_after_failure(
         self,
         cfg,
@@ -191,7 +236,11 @@ class AccountPool:
             self.mark_failure(reason, restricted=restricted)
 
         previous = self.current.email if self.current else ""
-        nxt = self.select_next(exclude_email=previous, registered_only=registered_only)
+        nxt = None
+        if not registered_only:
+            nxt = self.select_next(exclude_email=previous, registered_only=True)
+        if not nxt:
+            nxt = self.select_next(exclude_email=previous, registered_only=registered_only)
         if not nxt:
             log.error("No available account left in account pool.")
             return False
@@ -225,6 +274,10 @@ class AccountPool:
             acc.fail_count = int(state.get("fail_count") or 0)
             acc.cooldown_until = float(state.get("cooldown_until") or 0.0)
             acc.last_error = str(state.get("last_error") or "")
+            if acc.status in {"needs_registration", "cooldown", "retry"} and _looks_activation_needed(acc.last_error):
+                acc.status = "needs_activation"
+            if acc.status in {"needs_registration", "cooldown", "retry"} and _looks_login_verification_needed(acc.last_error):
+                acc.status = "registered"
             acc.last_used = float(state.get("last_used") or 0.0)
             acc.cookies_file = str(state.get("cookies_file") or acc.cookies_file)
 
@@ -245,7 +298,7 @@ class AccountPool:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.state_file.with_suffix(self.state_file.suffix + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self.state_file)
+        os.replace(tmp, self.state_file)
 
 
 def load_account_pool(cfg) -> AccountPool | None:
@@ -328,3 +381,39 @@ def _mask_email(email: str) -> str:
 def _short_reason(reason: str, limit: int = 240) -> str:
     reason = " ".join(str(reason).split())
     return reason[:limit]
+
+
+def _looks_activation_needed(reason: str) -> bool:
+    text = str(reason or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "already registered",
+            "already exists",
+            "email already",
+            "activation email",
+            "activation link",
+            "no activation email",
+            "no activation link",
+            "vfs says this email is already registered",
+            "уже зарегистр",
+            "уже существ",
+        )
+    )
+
+
+def _looks_login_verification_needed(reason: str) -> bool:
+    text = str(reason or "").lower()
+    return "login verification failed" in text and not _looks_not_registered(text)
+
+
+def _looks_not_registered(reason: str) -> bool:
+    text = str(reason or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "not registered",
+            "not yet registered",
+            "не зарегистр",
+        )
+    )

@@ -95,6 +95,13 @@ class SeleniumDriverAdapter:
     def type(self, selector: str, text: str, by: str = "css selector") -> None:
         self.driver.find_element(self._by(by), selector).send_keys(text)
 
+    def send_keys(self, selector: str, text: str, by: str = "css selector") -> None:
+        self.driver.find_element(self._by(by), selector).send_keys(text)
+
+    def scroll_to(self, selector: str, by: str = "css selector") -> None:
+        el = self.driver.find_element(self._by(by), selector)
+        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+
     def press_keys(self, selector: str, keys: str, by: str = "css selector") -> None:
         from selenium.webdriver.common.keys import Keys
 
@@ -157,10 +164,7 @@ def open_browser(cfg) -> Iterator[object]:
             adapter.set_default_timeout(8)
             yield adapter
         finally:
-            try:
-                driver.service.stop()
-            except Exception:
-                pass
+            log.info("Leaving attached Chrome session open.")
         return
 
     _patch_tempfile_permissions()
@@ -196,6 +200,12 @@ def open_browser(cfg) -> Iterator[object]:
         chromium_args.append(f"--remote-debugging-port={remote_debug_port}")
         chromium_args.append("--remote-allow-origins=*")
         log.info("Chrome remote debugging enabled on localhost:%s", remote_debug_port)
+    if getattr(cfg, "background_browser", False) and not cfg.headless:
+        x, y = getattr(cfg, "browser_window_position", (-32000, 0))
+        width, height = getattr(cfg, "browser_window_size", (1280, 900))
+        chromium_args.append(f"--window-position={x},{y}")
+        chromium_args.append(f"--window-size={width},{height}")
+        log.info("Browser background mode enabled at position %s,%s.", x, y)
     if proxy:
         kwargs["proxy"] = proxy
         if bridge:
@@ -228,6 +238,18 @@ def open_browser(cfg) -> Iterator[object]:
                 sb.driver.set_script_timeout(15)
             except Exception as e:
                 log.debug("Could not set script timeout: %s", e)
+            _apply_background_window(sb, cfg)
+            try:
+                # Register Turnstile hook at the CDP level to ensure it runs before any VFS Global scripts load.
+                # This guarantees that turnstile.render is captured and resolved callbacks are triggered correctly.
+                from .captcha import turnstile_hook_source_for_cdp
+                sb.driver.execute_cdp_cmd(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    {"source": turnstile_hook_source_for_cdp()},
+                )
+                log.info("Registered Turnstile CDP hook on new document.")
+            except Exception as e:
+                log.debug("Could not register Turnstile CDP hook: %s", e)
             yield sb
     finally:
         if bridge:
@@ -240,6 +262,19 @@ def _redact(proxy: str) -> str:
         user = creds.split(":", 1)[0]
         return f"{user}:***@{host}"
     return proxy
+
+
+def _apply_background_window(sb, cfg) -> None:
+    if not getattr(cfg, "background_browser", False) or getattr(cfg, "headless", False):
+        return
+    try:
+        x, y = getattr(cfg, "browser_window_position", (-32000, 0))
+        width, height = getattr(cfg, "browser_window_size", (1280, 900))
+        sb.driver.set_window_size(width, height)
+        sb.driver.set_window_position(x, y)
+        log.debug("Moved browser window to background position %s,%s (%sx%s).", x, y, width, height)
+    except Exception as e:
+        log.debug("Could not move browser window to background position: %s", e)
 
 
 def _user_data_dir(cfg) -> Path | None:

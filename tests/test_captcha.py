@@ -19,7 +19,7 @@ if importlib.util.find_spec("requests") is None:
 if importlib.util.find_spec("yaml") is None:
     sys.modules["yaml"] = types.SimpleNamespace(YAMLError=Exception, safe_load=lambda _: {})
 
-from bot.captcha import CapSolver, CaptchaError, get_solver
+from bot.captcha import CapSolver, CaptchaError, get_solver, turnstile_hook_source_for_cdp
 from bot.config import Config
 
 
@@ -59,8 +59,8 @@ def test_solve_turnstile_happy_path():
     poll1 = _resp({"errorId": 0, "status": "processing"})
     poll2 = _resp({"errorId": 0, "status": "ready",
                    "solution": {"token": "0.AAAA-fake-token"}})
-    with mock.patch("bot.captcha.requests.post",
-                    side_effect=[create, poll1, poll2]) as m, \
+    with mock.patch.object(cs.session, "post",
+                           side_effect=[create, poll1, poll2]) as m, \
          mock.patch("bot.captcha.time.sleep", return_value=None):
         token = cs.solve_turnstile("0xSITEKEY", "https://example.com/login")
     assert token == "0.AAAA-fake-token", token
@@ -71,11 +71,41 @@ def test_solve_turnstile_happy_path():
     assert urls[2].endswith("/getTaskResult"), urls
 
 
+def test_solve_turnstile_sends_cloudflare_metadata():
+    cs = CapSolver("CAP-X", timeout_seconds=5)
+    create = _resp({"errorId": 0, "taskId": "abc-123"})
+    ready = _resp({"errorId": 0, "status": "ready",
+                   "solution": {"token": "0.AAAA-fake-token"}})
+    with mock.patch.object(cs.session, "post", side_effect=[create, ready]) as m, \
+         mock.patch("bot.captcha.time.sleep", return_value=None):
+        cs.solve_turnstile(
+            "0xSITEKEY",
+            "https://example.com/login",
+            action="managed",
+            cdata="CDATA",
+            chl_page_data="CHL_PAGE_DATA",
+        )
+
+    task = m.call_args_list[0].kwargs["json"]["task"]
+    assert task["metadata"] == {
+        "action": "managed",
+        "cdata": "CDATA",
+        "chlPageData": "CHL_PAGE_DATA",
+    }
+
+
+def test_turnstile_hook_source_for_cdp_has_no_top_level_return():
+    source = turnstile_hook_source_for_cdp().lstrip()
+
+    assert not source.startswith("return ")
+    assert source.startswith("(() => {")
+
+
 def test_solve_turnstile_create_error():
     cs = CapSolver("CAP-X", timeout_seconds=5)
     bad = _resp({"errorId": 1, "errorCode": "ERROR_KEY_INVALID",
                  "errorDescription": "Bad key"})
-    with mock.patch("bot.captcha.requests.post", return_value=bad):
+    with mock.patch.object(cs.session, "post", return_value=bad):
         try:
             cs.solve_turnstile("0xSITEKEY", "https://example.com/login")
         except CaptchaError as e:
@@ -88,8 +118,8 @@ def test_solve_turnstile_timeout():
     cs = CapSolver("CAP-X", timeout_seconds=1)  # tiny timeout
     create = _resp({"errorId": 0, "taskId": "t-1"})
     proc = _resp({"errorId": 0, "status": "processing"})
-    with mock.patch("bot.captcha.requests.post",
-                    side_effect=[create] + [proc] * 50), \
+    with mock.patch.object(cs.session, "post",
+                           side_effect=[create] + [proc] * 50), \
          mock.patch("bot.captcha.time.sleep", return_value=None), \
          mock.patch("bot.captcha.time.time", side_effect=[100.0, 100.0, 121.0]):
         try:
@@ -112,7 +142,7 @@ def test_solve_cloudflare_challenge_happy_path():
             "userAgent": "UA",
         },
     })
-    with mock.patch("bot.captcha.requests.post", side_effect=[create, ready]) as m, \
+    with mock.patch.object(cs.session, "post", side_effect=[create, ready]) as m, \
          mock.patch("bot.captcha.time.sleep", return_value=None):
         sol = cs.solve_cloudflare_challenge(
             "https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable",
@@ -134,7 +164,7 @@ def test_solve_cloudflare_challenge_can_send_html():
         "status": "ready",
         "solution": {"token": "CLEARANCE"},
     })
-    with mock.patch("bot.captcha.requests.post", side_effect=[create, ready]) as m, \
+    with mock.patch.object(cs.session, "post", side_effect=[create, ready]) as m, \
          mock.patch("bot.captcha.time.sleep", return_value=None):
         sol = cs.solve_cloudflare_challenge(
             "https://lift-api.vfsglobal.com/appointment/CheckIsSlotAvailable",
