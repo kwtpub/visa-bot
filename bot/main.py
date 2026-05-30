@@ -213,9 +213,19 @@ def run(argv: list[str] | None = None) -> int:
     try:
         precheck_proxy(cfg)
     except ProxyDead as e:
-        log.error("%s", e)
-        notifier.error("proxy precheck", e)
-        return 1
+        # The precheck uses `requests`+PySocks, whose SOCKS5 path is unreliable
+        # (intermittent ConnectTimeout) even when the proxy is fine — Chrome's
+        # own SOCKS5 client reaches the site regardless. So by default a failed
+        # precheck only WARNS and lets the real browser try. Set
+        # network.proxy_precheck_fatal: true to abort instead.
+        if getattr(cfg, "proxy_precheck_fatal", False):
+            log.error("%s", e)
+            notifier.error("proxy precheck", e)
+            return 1
+        log.warning(
+            "%s — precheck is advisory (proxy_precheck_fatal=false); "
+            "continuing and letting the browser use the proxy directly.", e,
+        )
 
     if args.check_registration_form:
         try:

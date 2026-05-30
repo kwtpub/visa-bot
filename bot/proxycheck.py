@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import time
 
 import requests
 
@@ -56,38 +57,72 @@ def precheck_proxy(cfg) -> None:
 
     url = getattr(cfg, "proxy_check_url", "") or "https://api.ipify.org?format=json"
     timeout = getattr(cfg, "proxy_check_timeout", 20)
+    # Residential/mobile proxies often have a wedged exit on a given attempt
+    # (TLS handshake stalls). Retry a few times before declaring the proxy dead
+    # so one flaky exit doesn't block startup. Each attempt has its own hard
+    # (connect, read) timeout so the whole check is bounded by retries*timeout.
+    retries = max(1, getattr(cfg, "proxy_check_retries", 3))
+    connect_timeout = min(15, timeout)
     proxied = _proxy_url(proxy)
     use_bridge = (
         getattr(cfg, "proxy_auth_bridge_enabled", True)
         and auth_bridge_supported(proxied)
     )
     log.info(
-        "Checking proxy %s via %s%s",
+        "Checking proxy %s via %s%s (up to %d attempt(s))",
         _redact_proxy(proxied),
         url,
         " (local auth bridge)" if use_bridge else "",
+        retries,
     )
-    try:
-        if use_bridge:
-            bridge = start_proxy_auth_bridge(proxied)
-            if bridge is None:
-                raise ProxyDead("PROXY_DEAD: proxy auth bridge could not start")
-            with bridge:
-                local = f"http://{bridge.proxy}"
-                resp = requests.get(url, proxies={"http": local, "https": local}, timeout=timeout)
-        else:
-            resp = requests.get(url, proxies={"http": proxied, "https": proxied}, timeout=timeout)
-    except requests.RequestException as e:
-        raise ProxyDead(f"PROXY_DEAD: {e}") from e
 
-    if resp.status_code != 200:
-        snippet = (resp.text or "").strip().replace("\n", " ")[:160]
-        raise ProxyDead(f"PROXY_DEAD: check returned HTTP {resp.status_code}: {snippet}")
+    last_err: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            # Tuple timeout = (connect, read); caps both phases so a stalled
+            # handshake can't hang the process.
+            attempt_timeout = (connect_timeout, timeout)
+            if use_bridge:
+                bridge = start_proxy_auth_bridge(proxied)
+                if bridge is None:
+                    raise ProxyDead("PROXY_DEAD: proxy auth bridge could not start")
+                with bridge:
+                    local = f"http://{bridge.proxy}"
+                    resp = requests.get(
+                        url, proxies={"http": local, "https": local}, timeout=attempt_timeout
+                    )
+            else:
+                resp = requests.get(
+                    url, proxies={"http": proxied, "https": proxied}, timeout=attempt_timeout
+                )
+        except requests.RequestException as e:
+            last_err = e
+            if attempt < retries:
+                log.warning(
+                    "Proxy check attempt %d/%d failed (%s); retrying…",
+                    attempt, retries, type(e).__name__,
+                )
+                time.sleep(2)
+                continue
+            raise ProxyDead(f"PROXY_DEAD: {e} (after {retries} attempts)") from e
 
-    ip = ""
-    try:
-        data = resp.json()
-        ip = str(data.get("ip") or "")
-    except ValueError:
-        ip = (resp.text or "").strip()
-    log.info("Proxy precheck OK%s", f" (exit IP {_mask_ip(ip)})" if ip else "")
+        if resp.status_code != 200:
+            snippet = (resp.text or "").strip().replace("\n", " ")[:160]
+            raise ProxyDead(f"PROXY_DEAD: check returned HTTP {resp.status_code}: {snippet}")
+
+        ip = ""
+        try:
+            data = resp.json()
+            ip = str(data.get("ip") or "")
+        except ValueError:
+            ip = (resp.text or "").strip()
+        log.info(
+            "Proxy precheck OK%s%s",
+            f" (exit IP {_mask_ip(ip)})" if ip else "",
+            f" on attempt {attempt}" if attempt > 1 else "",
+        )
+        return
+
+    # Unreachable (loop either returns or raises), but keep the type-checker happy.
+    if last_err:
+        raise ProxyDead(f"PROXY_DEAD: {last_err}")

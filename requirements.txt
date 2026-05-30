@@ -10,6 +10,11 @@ requests>=2.31.0
 # Chrome DevTools Protocol websocket fallback used by registration navigation.
 websocket-client>=1.8.0
 
+# SOCKS5 proxy support for the requests-based proxy precheck (bot/proxycheck.py).
+# Residential providers like niceproxy.io are SOCKS5; without this, `requests`
+# raises "Missing dependencies for SOCKS support" whenever a socks5:// proxy is set.
+PySocks>=1.7.1
+
 # Optional: read OTP codes from an IMAP mailbox automatically.
 # If you don't configure IMAP, the bot falls back to manual console input.
 # (stdlib imaplib is used — nothing to install)

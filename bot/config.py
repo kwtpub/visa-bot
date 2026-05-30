@@ -142,6 +142,18 @@ class Config:
         return int(self.raw.get("network", {}).get("proxy_check_timeout_seconds", 20))
 
     @property
+    def proxy_check_retries(self) -> int:
+        # How many times the proxy precheck retries a flaky exit before giving up.
+        return int(self.raw.get("network", {}).get("proxy_check_retries", 3))
+
+    @property
+    def proxy_precheck_fatal(self) -> bool:
+        # If false (default), a failed proxy precheck only warns and the run
+        # continues (Chrome's own SOCKS5 client is the real test). If true,
+        # a failed precheck aborts startup.
+        return bool(self.raw.get("network", {}).get("proxy_precheck_fatal", False))
+
+    @property
     def page_load_timeout(self) -> int:
         return int(self.raw.get("network", {}).get("page_load_timeout_seconds", 35))
 

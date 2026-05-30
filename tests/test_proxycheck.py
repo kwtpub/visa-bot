@@ -51,7 +51,9 @@ def test_precheck_proxy_success_adds_http_scheme():
         "http": "http://user:pass@proxy.example:1000",
         "https": "http://user:pass@proxy.example:1000",
     }
-    assert get.call_args.kwargs["timeout"] == 20
+    # timeout is a (connect, read) tuple so a stalled handshake can't hang;
+    # read phase still honours proxy_check_timeout.
+    assert get.call_args.kwargs["timeout"] == (15, 20)
 
 
 def test_precheck_proxy_can_use_auth_bridge():

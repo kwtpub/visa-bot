@@ -130,14 +130,22 @@ class SeleniumDriverAdapter:
 
 
 def _proxy_for_sb(proxy: str) -> str | None:
-    """SeleniumBase wants the proxy as 'user:pass@host:port' or 'host:port'."""
+    """Normalise the proxy for SeleniumBase.
+
+    SeleniumBase wants 'user:pass@host:port' for HTTP proxies, but it parses
+    and REQUIRES the scheme for SOCKS proxies (socks5://, socks4://) so Chrome
+    is configured as a SOCKS proxy rather than HTTP. So strip only http(s)://;
+    keep socks schemes. (socks5h:// -> socks5://: SB doesn't know the 'h' form,
+    and proxy-side DNS is the default for Chrome's SOCKS5 anyway.)
+    """
     proxy = (proxy or "").strip()
     if not proxy:
         return None
-    # strip a scheme if the user pasted one
-    for scheme in ("http://", "https://", "socks5://", "socks5h://"):
+    if proxy.lower().startswith("socks5h://"):
+        return "socks5://" + proxy[len("socks5h://"):]
+    for scheme in ("http://", "https://"):
         if proxy.lower().startswith(scheme):
-            proxy = proxy[len(scheme):]
+            return proxy[len(scheme):]
     return proxy
 
 
