@@ -2,6 +2,8 @@
 config.yaml
 *.local.yaml
 .env
+# Real proxy credentials — keep local, never commit
+proxies.txt
 
 # SeleniumBase / browser artifacts
 downloaded_files/

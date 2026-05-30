@@ -1101,6 +1101,36 @@ def _page_looks_blank_or_error(sb) -> bool:
     return False
 
 
+def _login_form_or_turnstile_present(sb) -> bool:
+    """True once the login page is actually usable (form rendered or a Turnstile
+    challenge is showing). Used to tell a real load apart from a page that is
+    still loading through a stalled proxy."""
+    if first_visible(sb, S.LOGIN_EMAIL, timeout=0.5):
+        return True
+    return _turnstile_present(sb, timeout=0.5)
+
+
+def _wait_for_login_page_usable(sb, timeout: float = 25.0) -> bool:
+    """After a fire-and-forget navigation, wait up to `timeout` for the page to
+    either become usable (form/Turnstile) or reveal a Chrome error.
+
+    A stalled SOCKS5 proxy only paints ``ERR_TIMED_OUT`` after Chrome's own
+    connection timeout (~30-60s), long after the short post-navigation pause.
+    Returns True if the page is usable, False if it is blank/error or never
+    rendered anything within the timeout (caller should then retry).
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _page_looks_blank_or_error(sb):
+            return False
+        if _login_form_or_turnstile_present(sb):
+            return True
+        time.sleep(0.5)
+    # Timed out with neither a usable page nor a recognised error — treat as
+    # not-usable so the caller falls back to the retrying open path.
+    return _login_form_or_turnstile_present(sb)
+
+
 def _open_login_page(sb, cfg, reconnect_seconds: int = 5) -> None:
     """Open the login page with retry logic for unstable proxies.
 
@@ -1958,12 +1988,19 @@ def perform_login(sb, cfg, *, _after_mobile_update: bool = False) -> None:
     opened_with_preload = False
     if login_turnstile_token:
         log.info("Opening login page with preloaded Turnstile stub.")
-        opened_with_preload = _navigate_without_wait(sb, url)
-        human_pause(3, 5)
-        if _page_looks_blank_or_error(sb):
-            log.warning("Preloaded login navigation produced a blank/error page; falling back to UC reconnect.")
-            opened_with_preload = False
-            _stop_page_loading(sb)
+        if _navigate_without_wait(sb, url):
+            # Don't trust a fire-and-forget navigation after only a few seconds:
+            # a stalled SOCKS5 proxy keeps the page "loading" and only paints
+            # ERR_TIMED_OUT ~30-60s later. Wait until the page is actually
+            # usable (form/Turnstile) or clearly errored before committing.
+            if _wait_for_login_page_usable(sb, timeout=25.0):
+                opened_with_preload = True
+            else:
+                log.warning(
+                    "Preloaded login navigation did not yield a usable page "
+                    "(blank/error or proxy stall); falling back to UC reconnect."
+                )
+                _stop_page_loading(sb)
     if not opened_with_preload:
         _open_login_page(sb, cfg)
     human_pause(2, 4)
